@@ -1,0 +1,32 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "medknows-43e4c",
+          "appId": "1:36518448330:android:61ca4efab1fb8883e43833",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "medknows-43e4c",
+          "configurations": {
+            "android": "1:36518448330:android:61ca4efab1fb8883e43833",
+            "ios": "1:36518448330:ios:03af71b8ff0b364ce43833",
+            "macos": "1:36518448330:ios:03af71b8ff0b364ce43833",
+            "web": "1:36518448330:web:74834672fa0ff2c5e43833",
+            "windows": "1:36518448330:web:658d059e5ae9d4f7e43833"
+          }
+        }
+      }
+    }
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}
