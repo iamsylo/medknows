@@ -190,11 +190,25 @@ class _HistoryScreenState extends State<HistoryScreen> {
     return Card(
       margin: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: ListTile(
-        leading: Image.asset(
-          medicine['image'],
-          width: 40,
-          height: 40,
-        ),
+        leading: medicine['isMaintenanceIcon'] == true
+          ? Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Icon(
+                Icons.medication_rounded,
+                color: Colors.blue,
+                size: 24,
+              ),
+            )
+          : Image.asset(
+              medicine['image'],
+              width: 40,
+              height: 40,
+            ),
         title: Text(
           medicine['name'],
           style: GoogleFonts.openSans(

@@ -147,4 +147,221 @@ class MedicineSafety {
     
     return warnings;
   }
+
+  static bool canTakeTogether(
+    Map<String, dynamic> currentMedicine, 
+    Map<String, dynamic> newMedicine,
+  ) {
+    print('\nChecking if can take together:');
+    print('Current: ${currentMedicine['name']} (${currentMedicine['genericName']})');
+    print('New: ${newMedicine['name']} (${newMedicine['genericName']})');
+
+    // 1. Check for same medicine
+    if (_isSameMedicine(currentMedicine, newMedicine)) {
+      print('Same medicine detected');
+      return false;
+    }
+
+    // 2. Check for same or related ingredients
+    if (hasIngredientOverlap(currentMedicine, newMedicine)) { // Changed from _hasIngredientOverlap
+      print('Ingredient overlap detected');
+      return false;
+    }
+
+    // 3. Check for interactions (both ways)
+    if (_hasInteractions(currentMedicine, newMedicine) || 
+        _hasInteractions(newMedicine, currentMedicine)) {
+      print('Interaction detected');
+      return false;
+    }
+
+    print('Medicines can be taken together');
+    return true;
+  }
+
+  // Helper methods for cleaner logic
+  static bool _isSameMedicine(Map<String, dynamic> med1, Map<String, dynamic> med2) {
+    String name1 = med1['name'].toString().toLowerCase();
+    String name2 = med2['name'].toString().toLowerCase();
+    String generic1 = med1['genericName'].toString().toLowerCase();
+    String generic2 = med2['genericName'].toString().toLowerCase();
+
+    return name1 == name2 ||
+           generic1 == generic2 ||
+           name1.contains(generic2) ||
+           name2.contains(generic1) ||
+           generic1.contains(generic2) ||
+           generic2.contains(generic1);
+  }
+
+  static bool hasIngredientOverlap(Map<String, dynamic> med1, Map<String, dynamic> med2) {
+    // Get normalized ingredients for both medicines
+    Set<String> ingredients1 = _getNormalizedIngredients(med1);
+    Set<String> ingredients2 = _getNormalizedIngredients(med2);
+
+    // Debug logging
+    print('Checking ingredients:');
+    print('Med1 (${med1['name']}): $ingredients1');
+    print('Med2 (${med2['name']}): $ingredients2');
+
+    // Check each ingredient combination
+    for (var ing1 in ingredients1) {
+      for (var ing2 in ingredients2) {
+        // Check for exact match, substring match, or related ingredients
+        if (ing1 == ing2 || 
+            ing1.contains(ing2) || 
+            ing2.contains(ing1) ||
+            _areIngredientsRelated(ing1, ing2)) {
+          print('Ingredient overlap found: $ing1 - $ing2');
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  static Set<String> _getNormalizedIngredients(Map<String, dynamic> medicine) {
+    // Get ingredients from both activeIngredient and genericName
+    Set<String> ingredients = {};
+    
+    // Add active ingredients
+    ingredients.addAll(
+      medicine['activeIngredient']
+          .toString()
+          .toLowerCase()
+          .split(',')
+          .map((e) => normalizeIngredientName(e.trim()))
+    );
+
+    // Add generic name components (for compound medicines)
+    ingredients.addAll(
+      medicine['genericName']
+          .toString()
+          .toLowerCase()
+          .split('+')
+          .map((e) => normalizeIngredientName(e.trim()))
+    );
+
+    return ingredients;
+  }
+
+  static bool _hasInteractions(Map<String, dynamic> med1, Map<String, dynamic> med2) {
+    List<String> interactions = List<String>.from(med1['interactions'] ?? [])
+        .map((i) => normalizeIngredientName(i.toString().toLowerCase()))
+        .toList();
+
+    // Check against medicine name, generic name, and ingredients
+    String nameToCheck = med2['name'].toString().toLowerCase();
+    String genericToCheck = med2['genericName'].toString().toLowerCase();
+    Set<String> ingredientsToCheck = med2['activeIngredient']
+        .toString()
+        .toLowerCase()
+        .split(',')
+        .map<String>((e) => normalizeIngredientName(e.trim()))
+        .toSet();
+
+    return interactions.any((interaction) =>
+        nameToCheck.contains(interaction) ||
+        genericToCheck.contains(interaction) ||
+        ingredientsToCheck.any((ingredient) =>
+            ingredient.contains(interaction) ||
+            interaction.contains(ingredient)));
+  }
+
+  // Add this helper method
+  static bool _areIngredientsRelated(String ing1, String ing2) {
+    // Define groups of related ingredients
+    final relatedGroups = [
+      // NSAIDs group
+      {
+        'ibuprofen', 'naproxen', 'diclofenac', 'meloxicam', 'aspirin',
+        'ketoprofen', 'ketorolac', 'indomethacin', 'celecoxib'
+      },
+      // Paracetamol group
+      {
+        'paracetamol', 'acetaminophen', 'apap', 'tylenol', 'biogesic',
+        'tempra', 'calpol'
+      },
+      // Decongestants group
+      {
+        'phenylephrine', 'pseudoephedrine', 'oxymetazoline',
+        'phenylpropanolamine'
+      },
+      // Antihistamines group
+      {
+        'chlorphenamine', 'diphenhydramine', 'cetirizine',
+        'loratadine', 'fexofenadine'
+      },
+      // Cough suppressants group
+      {
+        'dextromethorphan', 'codeine', 'butamirate'
+      }
+    ];
+
+    // Check if ingredients belong to the same group
+    return relatedGroups.any((group) => 
+        group.contains(normalizeIngredientName(ing1)) && 
+        group.contains(normalizeIngredientName(ing2)));
+  }
+
+  // Changed from _normalizeIngredientName to normalizeIngredientName (made public)
+  static String normalizeIngredientName(String name) {
+    // Common variations and brand names mapping
+    final variations = {
+      'ibuprofen': [
+        'ibu',
+        'brufen',
+        'advil',
+        'motrin',
+        'nurofen',
+        'medicol',
+        'flanax',
+        'alaxan',  // Add since it contains ibuprofen
+      ],
+      'paracetamol': [
+        'acetaminophen',
+        'tylenol',
+        'panadol',
+        'biogesic',
+        'tempra',
+        'alaxan',  // Add since it contains paracetamol
+        'calpol',
+      ],
+      'phenylephrine': [
+        'bioflu',
+        'neozep',
+        'decolgen',
+      ],
+      // Add more normalized mappings
+    };
+
+    name = name.toLowerCase().trim();
+
+    // First check if the name contains any of the base ingredients
+    for (var base in variations.keys) {
+      if (name.contains(base)) {
+        return base;
+      }
+    }
+
+    // Then check for brand name variations
+    for (var base in variations.keys) {
+      if (variations[base]!.any((variant) => name.contains(variant))) {
+        return base;
+      }
+    }
+
+    // Handle compound medicines by splitting on common separators
+    final parts = name.split(RegExp(r'[,+&/]'));
+    for (var part in parts) {
+      part = part.trim();
+      for (var base in variations.keys) {
+        if (variations[base]!.any((variant) => part.contains(variant))) {
+          return base;
+        }
+      }
+    }
+
+    return name;
+  }
 }

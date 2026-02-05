@@ -3,12 +3,14 @@ import 'package:intl/intl.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart'; // Add this import
+import 'package:medknows/pages/initial_health_screen.dart';
 import '../models/user_data.dart';  // Updated to lowercase path
 import 'package:medknows/pages/home_screen.dart'; // Add this import
 import 'package:flutter/services.dart';  // Add this import for TextInputFormatter
 import 'package:crypto/crypto.dart';
 import 'dart:convert';
 import 'dart:math';
+import 'package:shared_preferences/shared_preferences.dart'; // Add this import
 
 class SignupPage extends StatefulWidget {
   const SignupPage({super.key});
@@ -27,9 +29,15 @@ class _SignupPageState extends State<SignupPage> {
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _heightController = TextEditingController();
   final TextEditingController _weightController = TextEditingController();
+  final TextEditingController _heightFeetController = TextEditingController();
+  final TextEditingController _heightInchController = TextEditingController();
   
   bool _isLoading = false;
   String _sex = 'Male';
+  String _heightUnit = 'cm';
+  String _weightUnit = 'kg';
+  bool _passwordVisible = false;
+  bool _confirmPasswordVisible = false;
 
   @override
   void initState() {
@@ -56,6 +64,52 @@ class _SignupPageState extends State<SignupPage> {
     _ageController.text = age.toString();
   }
 
+  double _convertHeight(String value) {
+    if (_heightUnit == 'cm') {
+      return double.tryParse(value) ?? 0;
+    } else {
+      // Convert feet and inches to cm
+      double feet = double.tryParse(_heightFeetController.text) ?? 0;
+      double inches = double.tryParse(_heightInchController.text) ?? 0;
+      return (feet * 30.48) + (inches * 2.54);
+    }
+  }
+
+  void _updateFeetAndInches(String cmValue) {
+    if (cmValue.isEmpty) {
+      _heightFeetController.text = '';
+      _heightInchController.text = '';
+      return;
+    }
+
+    double cm = double.tryParse(cmValue) ?? 0;
+    double totalInches = cm / 2.54;
+    int feet = (totalInches / 12).floor();
+    double inches = totalInches % 12;
+    
+    _heightFeetController.text = feet.toString();
+    _heightInchController.text = inches.toStringAsFixed(1);
+  }
+
+  double _convertWeight(String value) {
+    if (value.isEmpty) return 0;
+    double weight = double.tryParse(value) ?? 0;
+    if (_weightUnit == 'lbs') {
+      // Convert pounds to kilograms
+      return weight * 0.453592;
+    }
+    return weight;
+  }
+
+  bool _validatePassword(String password) {
+    if (password.length < 8) return false;
+    if (!RegExp(r'[A-Z]').hasMatch(password)) return false;
+    if (!RegExp(r'[a-z]').hasMatch(password)) return false;
+    if (!RegExp(r'[0-9]').hasMatch(password)) return false;
+    if (!RegExp(r'[!@#\$%^&*(),.?":{}|<>]').hasMatch(password)) return false;
+    return true;
+  }
+
   bool _validateFirstPage() {
     if (_usernameController.text.trim().isEmpty) {
       _showError('Please enter a username');
@@ -63,6 +117,10 @@ class _SignupPageState extends State<SignupPage> {
     }
     if (_passwordController.text.isEmpty) {
       _showError('Please enter your password');
+      return false;
+    }
+    if (!_validatePassword(_passwordController.text)) {
+      _showError('Password must be at least 8 characters and contain:\n- Upper & lowercase letters\n- Numbers\n- Special characters');
       return false;
     }
     if (_confirmPasswordController.text.isEmpty) {
@@ -220,9 +278,57 @@ class _SignupPageState extends State<SignupPage> {
               });
             }),
             const SizedBox(height: 10),
-            _buildTextField('Height (cm)', controller: _heightController, isNumeric: true),  // Add isNumeric: true
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _buildHeightInput(),
+                const SizedBox(width: 10),
+                _buildUnitToggle(_heightUnit, ['cm', 'ft'], (String? newValue) {
+                  setState(() {
+                    if (newValue != null) {
+                      if (newValue == 'ft' && _heightUnit == 'cm') {
+                        // Converting from cm to feet/inches
+                        _updateFeetAndInches(_heightController.text);
+                      } else if (newValue == 'cm' && _heightUnit == 'ft') {
+                        // Already have the cm value in _heightController
+                      }
+                      _heightUnit = newValue;
+                    }
+                  });
+                }),
+              ],
+            ),
             const SizedBox(height: 10),
-            _buildTextField('Weight (kg)', controller: _weightController, isNumeric: true),  // Add isNumeric: true
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(
+                  width: 200, // Slightly reduced width to accommodate switch
+                  child: _buildTextField(
+                    'Weight (${_weightUnit})', 
+                    controller: _weightController, 
+                    isNumeric: true
+                  ),
+                ),
+                const SizedBox(width: 10),
+                _buildUnitToggle(_weightUnit, ['kg', 'lbs'], (String? newValue) {
+                  setState(() {
+                    if (newValue != null) {
+                      String currentValue = _weightController.text;
+                      if (currentValue.isNotEmpty) {
+                        double value = double.tryParse(currentValue) ?? 0;
+                        if (newValue == 'lbs' && _weightUnit == 'kg') {
+                          _weightController.text = (value * 2.20462).toStringAsFixed(2);
+                        } else if (newValue == 'kg' && _weightUnit == 'lbs') {
+                          _weightController.text = (value / 2.20462).toStringAsFixed(2);
+                        }
+                      }
+                      _weightUnit = newValue;
+                    }
+                  });
+                }),
+              ],
+            ),
             const SizedBox(height: 50),
             _buildRegisterButton(),
           ],
@@ -236,8 +342,45 @@ class _SignupPageState extends State<SignupPage> {
     bool obscureText = false, 
     bool enabled = true, 
     VoidCallback? onTap,
-    bool isNumeric = false  // Add this parameter
+    bool isNumeric = false,
+    ValueChanged<String>? onChanged,
   }) {
+    // Special handling for password fields
+    if (label == 'Password' || label == 'Confirm Password') {
+      bool isVisible = label == 'Password' ? _passwordVisible : _confirmPasswordVisible;
+      return SizedBox(
+        width: 305,
+        child: TextField(
+          controller: controller,
+          obscureText: !isVisible,
+          enabled: enabled,
+          decoration: InputDecoration(
+            labelText: label,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(24),
+            ),
+            suffixIcon: IconButton(
+              icon: Icon(
+                isVisible ? Icons.visibility : Icons.visibility_off,
+                color: const Color.fromRGBO(66, 96, 208, 1),
+              ),
+              onPressed: () {
+                setState(() {
+                  if (label == 'Password') {
+                    _passwordVisible = !_passwordVisible;
+                  } else {
+                    _confirmPasswordVisible = !_confirmPasswordVisible;
+                  }
+                });
+              },
+            ),
+          ),
+          onTap: onTap,
+          onChanged: onChanged,
+        ),
+      );
+    }
+
     return SizedBox(
       width: 305,
       child: TextField(
@@ -255,6 +398,7 @@ class _SignupPageState extends State<SignupPage> {
           ),
         ),
         onTap: onTap,
+        onChanged: onChanged, // Add this line
       ),
     );
   }
@@ -278,6 +422,135 @@ class _SignupPageState extends State<SignupPage> {
         onChanged: onChanged,
       ),
     );
+  }
+
+  Widget _buildUnitToggle(String currentValue, List<String> units, void Function(String?) onChanged) {
+    return SizedBox(
+      width: 100, // Fixed width
+      height: 40,  // Fixed height
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.grey.shade200,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Stack(
+          children: [
+            AnimatedAlign(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeInOut,
+              alignment: currentValue == units[0] 
+                  ? Alignment.centerLeft 
+                  : Alignment.centerRight,
+              child: Container(
+                width: 50,
+                height: 36,
+                margin: const EdgeInsets.symmetric(horizontal: 2),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.max,
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => onChanged(units[0]),
+                    child: Center(
+                      child: Text(
+                        units[0],
+                        style: TextStyle(
+                          color: currentValue == units[0] 
+                              ? const Color.fromRGBO(66, 96, 208, 1)
+                              : Colors.grey,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => onChanged(units[1]),
+                    child: Center(
+                      child: Text(
+                        units[1],
+                        style: TextStyle(
+                          color: currentValue == units[1] 
+                              ? const Color.fromRGBO(66, 96, 208, 1)
+                              : Colors.grey,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeightInput() {
+    if (_heightUnit == 'cm') {
+      return SizedBox(
+        width: 200,
+        child: _buildTextField(
+          'Height (cm)', 
+          controller: _heightController,
+          isNumeric: true
+        ),
+      );
+    } else {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 100,
+            child: _buildTextField(
+              'Feet',
+              controller: _heightFeetController,
+              isNumeric: true,
+              onChanged: (value) {
+                if (_heightFeetController.text.isNotEmpty || _heightInchController.text.isNotEmpty) {
+                  double totalCm = _convertHeight('');
+                  _heightController.text = totalCm.toStringAsFixed(2);
+                }
+              },
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 100,
+            child: _buildTextField(
+              'Inches',
+              controller: _heightInchController,
+              isNumeric: true,
+              onChanged: (value) {
+                if (_heightFeetController.text.isNotEmpty || _heightInchController.text.isNotEmpty) {
+                  double totalCm = _convertHeight('');
+                  _heightController.text = totalCm.toStringAsFixed(2);
+                }
+              },
+            ),
+          ),
+        ],
+      );
+    }
   }
 
   Widget _buildNextButton() {
@@ -412,32 +685,36 @@ class _SignupPageState extends State<SignupPage> {
       final salt = _generateSalt();
       final hashedPassword = _hashPasswordWithSalt(_passwordController.text, salt);
 
-      final docRef = FirebaseFirestore.instance.collection('users').doc();
+      // Create a new document with auto-generated ID
+      final userRef = FirebaseFirestore.instance.collection('users').doc();
       
-      // Create UserData instance
+      // Create UserData instance with the generated ID
       final userData = UserData(
-        id: docRef.id,
+        id: userRef.id, // Use the generated ID
         username: _usernameController.text.trim(),
         name: _nameController.text,
         birthdate: _birthdateController.text,
         age: int.parse(_ageController.text),
         sex: _sex,
-        height: double.parse(_heightController.text),
-        weight: double.parse(_weightController.text),
+        height: _convertHeight(_heightController.text),
+        weight: _convertWeight(_weightController.text),
       );
 
       final Map<String, dynamic> dataToSave = {
         ...userData.toMap(),
         'hashedPassword': hashedPassword,
-        'salt': salt, // Store salt separately
+        'salt': salt,
         'createdAt': FieldValue.serverTimestamp(),
       };
 
       // Remove any plain text password field
       dataToSave.remove('password');
 
-      await docRef.set(dataToSave);
-      
+      // Save to Firestore and store user ID in SharedPreferences
+      await userRef.set(dataToSave);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('userId', userRef.id);
+
       if (!mounted) return;
 
       // Show success message
@@ -453,9 +730,13 @@ class _SignupPageState extends State<SignupPage> {
       
       if (!mounted) return;
 
-      // Navigate to intro page and clear stack
-      Navigator.of(context).pushNamedAndRemoveUntil(
-        '/', // Your intro route
+      // Navigate to initial health questionnaire
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(
+          builder: (context) => InitialHealthScreen(
+            userData: userData,
+          ),
+        ),
         (Route<dynamic> route) => false,
       );
 

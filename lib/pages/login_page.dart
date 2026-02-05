@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:medknows/models/user_data.dart';
 import 'package:medknows/pages/home_screen.dart'; // Ensure this path is correct
+import 'package:medknows/pages/initial_health_screen.dart';
 import 'package:medknows/pages/signup_page.dart'; // Add this import
 import 'package:shared_preferences/shared_preferences.dart'; // Add this import
 import 'package:crypto/crypto.dart';
@@ -48,7 +50,6 @@ class _LoginPageState extends State<LoginPage> {
     try {
       print('Attempting to login...');
       
-      // First, fetch user by username only
       final userQuery = await FirebaseFirestore.instance
           .collection('users')
           .where('username', isEqualTo: _usernameController.text.trim())
@@ -62,7 +63,7 @@ class _LoginPageState extends State<LoginPage> {
       final userDoc = userQuery.docs.first;
       final userData = userDoc.data();
       
-      // Get salt and verify password
+      // Verify password
       final salt = userData['salt'] as String;
       final hashedPassword = _hashPasswordWithSalt(_passwordController.text, salt);
       
@@ -71,25 +72,37 @@ class _LoginPageState extends State<LoginPage> {
         return;
       }
 
-      // Login successful
-      final userName = userData['name'] as String;
+      final user = UserData.fromMap(userData);
       final userId = userDoc.id;
 
-      // Store the user ID in SharedPreferences
+      // Store user ID
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('userId', userId);
 
       if (!mounted) return;
 
-      // Navigate to home screen
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (context) => HomeScreen(
-            userName: userName,
+      // Check initial health questionnaire completion
+      final bool hasCompletedInitialHealth = userData['hasCompletedInitialQuestionnaire'] ?? false;
+      final initialHealth = userData['initialHealth'];
+
+      // Redirect based on questionnaire status
+      if (!hasCompletedInitialHealth || initialHealth == null) {
+        print('Initial health assessment not completed - redirecting to questionnaire');
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (context) => InitialHealthScreen(userData: user),
           ),
-        ),
-      );
+          (Route<dynamic> route) => false,
+        );
+      } else {
+        print('Initial health assessment completed - redirecting to home');
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (context) => HomeScreen(userName: user.name),
+          ),
+          (Route<dynamic> route) => false,
+        );
+      }
     } catch (e) {
       print('Login error: $e');
       _showError('Login failed. Please try again.');

@@ -26,35 +26,36 @@ class IntroPage extends StatelessWidget {
               children: [
                 // Title
                 Text(
-                  'MedKnows',
+                  'OTICURE',
                   style: GoogleFonts.playfairDisplaySc(
                   textStyle: const TextStyle(
-                    fontSize: 64,
+                    fontSize: 90,
                     fontWeight: FontWeight.bold,
                     color: Colors.blue,
                     height: 1, // Adjusted line height
                   ),
                   ),
                 ),
-                const SizedBox(height: 5),
+                const SizedBox(height: 20),
                 // Phrase
                 Text(
-                  'Timely and Accurate Medication',
+                  'Over-The-Counter Medicine Recommender and Tracking Application',
                   style: GoogleFonts.openSans(
                   textStyle: const TextStyle(
-                    fontSize: 20,
+                    fontSize: 12,
                     fontStyle: FontStyle.italic,
+                    fontWeight: FontWeight.bold,
                     height: 1, // Adjusted line height
                   ),
                   ),
                   textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 40),
+                const SizedBox(height: 10),
                 // Logo
                 Lottie.network(
                   'https://lottie.host/48e5f1f7-2e93-43dc-869a-98d36ba1064d/FAgElaJWbC.json',
-                  width: 300,
-                  height: 300,
+                  width: 350,
+                  height: 350,
                 ),
                 const SizedBox(height: 80),
                 // Get Started Button

@@ -1,12 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:medknows/models/user_data.dart';  // Add this import
+import 'package:medknows/utils/medicine_safety.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:open_file/open_file.dart';
+import 'package:path_provider/path_provider.dart';
+import 'dart:io';
 import '../utils/active_medicine_manager.dart';
 import 'medicines.dart';
 import '../widgets/take_medicine_form.dart';
 import '../widgets/health_questionnaire.dart';
 import '../utils/text_embeddings.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:path_provider/path_provider.dart';
 
 class MedicinesScreen extends StatefulWidget {
   final bool showBackButton;
@@ -70,11 +77,47 @@ class _MedicinesScreenState extends State<MedicinesScreen> {
   @override
   void initState() {
     super.initState();
-    _loadUserData();
-    // Use addPostFrameCallback to ensure context is available
+    _loadUserDataAndInitialize();  // Replace _loadUserData() with this
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkAndShowWarning();
     });
+  }
+
+  // Add this new method
+  Future<void> _loadUserDataAndInitialize() async {
+    try {
+      setState(() => _isLoading = true);
+
+      final prefs = await SharedPreferences.getInstance();
+      final String? userId = prefs.getString('userId');
+
+      if (userId != null) {
+        final userDoc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(userId)
+            .get();
+
+        if (userDoc.exists) {
+          final userData = UserData.fromMap({
+            'id': userId,  // Add the ID explicitly
+            ...userDoc.data() ?? {},
+          });
+
+          if (mounted) {
+            setState(() {
+              _userData = userData;
+              _isLoading = false;
+            });
+          }
+        }
+      }
+    } catch (e) {
+      print('Error loading user data: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   // Add this new method
@@ -90,31 +133,6 @@ class _MedicinesScreenState extends State<MedicinesScreen> {
       }
     } catch (e) {
       print('Error showing active medicine warning: $e');
-    }
-  }
-
-  // Add this method
-  Future<void> _loadUserData() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final String? userId = prefs.getString('userId');
-
-      if (userId != null) {
-        final userData = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(userId)
-            .get();
-
-        if (userData.exists) {
-          setState(() {
-            _userData = UserData.fromMap(userData.data()!);
-            _isLoading = false;
-          });
-        }
-      }
-    } catch (e) {
-      print('Error loading user data: $e');
-      setState(() => _isLoading = false);
     }
   }
 
@@ -388,103 +406,93 @@ class _MedicinesScreenState extends State<MedicinesScreen> {
     }
   }
 
-  List<Map<String, dynamic>> getFilteredMedicines() {
+  // Update to async method
+  Future<List<Map<String, dynamic>>> getFilteredMedicines() async {
     if (_questionnaireData == null) return [];
 
-    // First check for active medication interactions
-    if (_questionnaireData!['takingMedications'] == 'Yes' && 
-        _questionnaireData!['currentMedications'].isNotEmpty) {
-      String currentMed = _questionnaireData!['currentMedications'].toLowerCase();
-      
-      // Filter out medicines that could interact with active medicine
-      return medicines.where((medicine) {
-        // Extract medicine name from the format "MedicineName (GenericName)"
-        String activeMedName = currentMed.split('(')[0].trim().toLowerCase();
-        
-        // Check if this medicine is in the interactions list
-        bool hasInteraction = medicine['interactions'].any((interaction) =>
-          interaction.toString().toLowerCase().contains(activeMedName));
-        
-        // Include medicine only if it doesn't interact with active medicine
-        return !hasInteraction && 
-               !_hasExclusionCriteria(medicine) && 
-               _hasMatchingSymptoms(medicine);
-      }).toList();
-    }
-
-    // Check symptom duration first
     if (_questionnaireData!['symptomsDuration'] == 'More than 3 days') {
-      return []; // Return empty list to trigger the warning message
+      return [];
     }
 
-    // Create vocabulary from medicine descriptions and categories
-    List<String> vocabulary = [];
-    for (var medicine in medicines) {
-      vocabulary.addAll(_processText(medicine['description']));
-      vocabulary.addAll(_processText(medicine['contraindication']));
-      vocabulary.addAll((medicine['categories'] as List).map((c) => c.toString().toLowerCase()));
-      vocabulary.addAll(_processText(medicine['activeIngredient']));
-      vocabulary.addAll((medicine['interactions'] as List).map((i) => i.toString().toLowerCase()));
-    }
-    vocabulary = vocabulary.toSet().toList();
+    try {
+      final healthData = await _getHealthData();
+      final activeMedicines = await _getAllActiveMedicines();
+      final vocabulary = await _buildVocabulary();
+      final userProfile = _createDetailedUserProfile(healthData!);
+      final userEmbedding = TextEmbeddings.getTextEmbedding(userProfile, vocabulary);
+      
+      if (healthData == null) return [];
 
-    String userProfile = _createDetailedUserProfile();
-    Map<String, double> userEmbedding = TextEmbeddings.getTextEmbedding(userProfile, vocabulary);
+      List<Map<String, dynamic>> eligibleMedicines = [];
 
-    List<Map<String, dynamic>> scoredMedicines = medicines.map((medicine) {
-      // Check if medicine is for flu when "flu" is mentioned in other symptoms
-      bool isFluMedicine = false;
-      if (_questionnaireData!['symptoms']['Other'] == true) {
-        String otherSymptoms = _questionnaireData!['otherSymptoms'].toLowerCase();
-        if ((otherSymptoms.contains('flu') || otherSymptoms.contains('influenza')) &&
-            (medicine['categories'] as List).any((category) => 
-                ['Cold', 'Flu', 'Fever'].contains(category.toString()))) {
-          isFluMedicine = true;
+      for (var medicine in medicines) {
+        // First check if medicine matches any symptoms
+        if (_countMatchingSymptoms(medicine) == 0) continue;
+
+        bool shouldExclude = false;
+        
+        // Check against active medicines
+        for (var activeMedicine in activeMedicines) {
+          if (_isSimilarMedicine(medicine, activeMedicine) ||
+              MedicineSafety.hasIngredientOverlap(medicine, activeMedicine) ||
+              _hasInteractionRisk(medicine, activeMedicine)) {
+            shouldExclude = true;
+            break;
+          }
+        }
+
+        if (!shouldExclude && !_hasExclusionCriteria(medicine, healthData)) {
+          double symptomScore = _calculateSymptomScore(medicine) * 0.40;
+          double safetyScore = _calculateSafetyScore(medicine, healthData) * 0.35;
+          double relevanceScore = _calculateRelevanceScore(medicine, userEmbedding, vocabulary) * 0.25;
+          
+          double totalScore = symptomScore + safetyScore + relevanceScore;
+          
+          var scoredMedicine = Map<String, dynamic>.from(medicine);
+          scoredMedicine['totalScore'] = totalScore;
+          scoredMedicine['symptomScore'] = symptomScore;
+          scoredMedicine['safetyScore'] = safetyScore;
+          scoredMedicine['relevanceScore'] = relevanceScore;
+          
+          eligibleMedicines.add(scoredMedicine);
         }
       }
 
-      // If it's a flu medicine or matches other criteria
-      if (isFluMedicine || (!_hasExclusionCriteria(medicine) && _hasMatchingSymptoms(medicine))) {
-        double symptomScore = _calculateSymptomScore(medicine);
-        double safetyScore = _calculateSafetyScore(medicine);
-        double relevanceScore = _calculateRelevanceScore(medicine, userEmbedding, vocabulary);
+      eligibleMedicines.sort((a, b) => (b['totalScore']).compareTo(a['totalScore']));
+      return eligibleMedicines;
 
-        return {
-          'medicine': medicine,
-          'score': (symptomScore * 0.4) + (safetyScore * 0.35) + (relevanceScore * 0.25),
-        };
-      }
-
-      return {'medicine': medicine, 'score': -1.0};
-    }).toList();
-
-    // Filter and sort medicines
-    var validMedicines = scoredMedicines
-        .where((item) => item['score'] > 0)
-        .toList()
-      ..sort((a, b) => b['score'].compareTo(a['score']));
-
-    return validMedicines.map((item) => item['medicine'] as Map<String, dynamic>).toList();
+    } catch (e) {
+      print('Error in getFilteredMedicines: $e');
+      return [];
+    }
   }
 
-  List<String> _processText(String text) {
-    return text
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^\w\s]'), ' ')
-        .split(RegExp(r'\s+'))
-        .where((word) => word.isNotEmpty)
-        .toList();
+  Future<List<String>> _buildVocabulary() async {
+    Set<String> vocabulary = {};
+    
+    // Add symptoms vocabulary
+    symptomToCategoryMap.keys.forEach((symptom) {
+      vocabulary.addAll(_processText(symptom));
+    });
+    
+    // Add medicine-related terms
+    for (var medicine in medicines) {
+      vocabulary.addAll(_processText(medicine['description']));
+      vocabulary.addAll(_processText(medicine['activeIngredient']));
+      vocabulary.addAll(List<String>.from(medicine['categories']));
+    }
+    
+    return vocabulary.toList();
   }
 
-  String _createDetailedUserProfile() {
+  String _createDetailedUserProfile(Map<String, dynamic> healthData) {
     List<String> profileElements = [];
     
-    // Add symptoms with emphasis
+    // Add current symptoms with emphasis
     Map<String, bool> symptoms = Map<String, bool>.from(_questionnaireData!['symptoms']);
     symptoms.forEach((symptom, hasSymptom) {
       if (hasSymptom) {
         profileElements.add(symptom);
-        // Add related terms from symptom categories
         List<String>? categories = symptomToCategoryMap[symptom];
         if (categories != null) {
           profileElements.addAll(categories);
@@ -497,117 +505,82 @@ class _MedicinesScreenState extends State<MedicinesScreen> {
       profileElements.add(_questionnaireData!['otherSymptoms']);
     }
 
-    // Add health conditions
-    Map<String, bool> conditions = Map<String, bool>.from(_questionnaireData!['healthConditions']);
-    conditions.forEach((condition, hasCondition) {
-      if (hasCondition) profileElements.add(condition);
-    });
-
-    // Add current medications
-    if (_questionnaireData!['takingMedications'] == 'Yes') {
-      profileElements.add(_questionnaireData!['currentMedications']);
+    // Add vital signs context
+    Map<String, dynamic> vitals = _questionnaireData!['vitals'];
+    String temp = vitals['temperature'];
+    if (double.tryParse(temp) != null) {
+      double tempValue = double.parse(temp);
+      if (tempValue > 37.5) profileElements.add('fever high_temperature');
     }
 
-    // Add allergies
-    if (_questionnaireData!['hasAllergies'] == 'Yes') {
-      profileElements.add(_questionnaireData!['allergies']);
+    // Add health conditions from initial health data
+    Map<String, bool> conditions = Map<String, bool>.from(healthData['healthConditions']);
+    conditions.forEach((condition, hasCondition) {
+      if (hasCondition) profileElements.add('condition_$condition');
+    });
+
+    // Add current medications context
+    if (healthData['takingMedications'] == 'Yes') {
+      profileElements.add('taking_medications');
+      profileElements.add(healthData['currentMedications']);
+    }
+
+    // Add allergies context
+    if (healthData['hasAllergies'] == 'Yes') {
+      profileElements.add('has_allergies');
+      profileElements.add(healthData['allergies']);
     }
 
     // Add lifestyle factors
-    if (_questionnaireData!['drinking'] == 'Yes') {
-      profileElements.add('alcohol interaction risk');
+    if (healthData['smoking'] == 'Yes') profileElements.add('smoker smoking_risk');
+    if (healthData['drinking'] == 'Yes') profileElements.add('alcohol alcohol_interaction_risk');
+
+    // Add pregnancy context if applicable
+    if (healthData['isPregnant'] == true) {
+      profileElements.add('pregnant pregnancy_risk');
+      profileElements.add(healthData['pregnancyTrimester']);
     }
 
     return profileElements.join(' ');
   }
 
-  bool _hasMatchingSymptoms(Map<String, dynamic> medicine) {
-    int matchCount = _countMatchingSymptoms(medicine);
-    return matchCount > 0;
-  }
-
-  bool _hasExclusionCriteria(Map<String, dynamic> medicine) {
-    // Check critical exclusions
-    String contraindications = medicine['contraindication'].toString().toLowerCase();
-    String ingredients = medicine['activeIngredient'].toString().toLowerCase();
-    List<dynamic> interactions = medicine['interactions'] as List;
-
-    // Enhanced health conditions check with detailed warnings
-    Map<String, bool> conditions = Map<String, bool>.from(_questionnaireData!['healthConditions']);
+  double _calculateSafetyScore(Map<String, dynamic> medicine, Map<String, dynamic> healthData) {
+    double score = 1.0;
+    
+    // Check contraindications against health conditions
+    Map<String, bool> conditions = Map<String, bool>.from(healthData['healthConditions']);
     for (var entry in conditions.entries) {
-      if (entry.value) {
-        String condition = entry.key.toLowerCase();
-        
-        // Check specific conditions with strict criteria
-        switch (condition) {
-          case 'diabetes':
-            if (contraindications.contains('diabetes') ||
-                contraindications.contains('blood sugar') ||
-                contraindications.contains('glucose') ||
-                contraindications.contains('g6pd')) {
-              return true;
-            }
-            break;
-            
-          case 'high blood pressure':
-            if (contraindications.contains('hypertension') ||
-                contraindications.contains('high blood pressure') ||
-                contraindications.contains('blood pressure') ||
-                ingredients.contains('phenylephrine') ||
-                ingredients.contains('pseudoephedrine')) {
-              return true;
-            }
-            break;
-            
-          case 'heart disease':
-            if (contraindications.contains('heart') ||
-                contraindications.contains('cardiac') ||
-                contraindications.contains('cardiovascular') ||
-                medicine['interactions'].any((i) => 
-                  i.toString().toLowerCase().contains('blood pressure') ||
-                  i.toString().toLowerCase().contains('heart'))) {
-              return true;
-            }
-            break;
-            
-          case 'asthma':
-            if (contraindications.contains('asthma') ||
-                contraindications.contains('respiratory') ||
-                contraindications.contains('breathing')) {
-              return true;
-            }
-            break;
-        }
+      if (entry.value && 
+          medicine['contraindication'].toString().toLowerCase().contains(entry.key.toLowerCase())) {
+        score -= 0.3;
+      }
+    }
 
-        // General contraindication check
-        if (_hasContraindication(condition, contraindications)) {
-          return true;
+    // Check medication interactions
+    if (healthData['takingMedications'] == 'Yes') {
+      String currentMeds = healthData['currentMedications'].toLowerCase();
+      for (var interaction in medicine['interactions']) {
+        if (interaction.toString().toLowerCase().contains(currentMeds)) {
+          score -= 0.4;
         }
       }
     }
 
-    // Pregnancy check
-    if (_questionnaireData!['isPregnant'] == true) {
-      if (contraindications.contains('pregnan') ||
-          contraindications.contains('gestation') ||
-          contraindications.contains('fetus')) {
-        return true;
-      }
-      
-      // Special handling for pregnancy trimesters
-      String trimester = _questionnaireData!['pregnancyTrimester'].toLowerCase();
-      if (contraindications.contains(trimester) ||
-          (trimester == 'third' && contraindications.contains('third trimester'))) {
-        return true;
+    // Check allergies
+    if (healthData['hasAllergies'] == 'Yes') {
+      String allergies = healthData['allergies'].toLowerCase();
+      if (medicine['activeIngredient'].toString().toLowerCase().contains(allergies)) {
+        score -= 0.5;
       }
     }
 
-    // Rest of the existing checks
-    // ...existing allergy checks...
-    // ...existing alcohol checks...
-    // ...existing medication interaction checks...
+    // Pregnancy considerations
+    if (healthData['isPregnant'] == true && 
+        medicine['contraindication'].toString().toLowerCase().contains('pregnan')) {
+      score -= 0.6;
+    }
 
-    return false;
+    return score.clamp(0.0, 1.0);
   }
 
   double _calculateSymptomScore(Map<String, dynamic> medicine) {
@@ -618,27 +591,6 @@ class _MedicinesScreenState extends State<MedicinesScreen> {
         .length;
 
     return totalSymptoms > 0 ? matchingSymptoms / totalSymptoms : 0.0;
-  }
-
-  double _calculateSafetyScore(Map<String, dynamic> medicine) {
-    double score = 1.0;
-    
-    // Deduct points for potential risks
-    if (medicine['contraindication'].toString().toLowerCase().contains('caution')) {
-      score -= 0.1;
-    }
-    
-    if (medicine['interactions'].length > 10) {
-      score -= 0.1; // More interactions = higher risk
-    }
-
-    // Consider age restrictions
-    int ageRestriction = int.parse(medicine['ageRestriction']);
-    if (_userData?.age != null && _userData!.age < ageRestriction + 3) {
-      score -= 0.2; // Closer to age restriction = lower score
-    }
-
-    return score.clamp(0.0, 1.0);
   }
 
   double _calculateRelevanceScore(Map<String, dynamic> medicine, 
@@ -657,415 +609,439 @@ class _MedicinesScreenState extends State<MedicinesScreen> {
     return TextEmbeddings.cosineSimilarity(userEmbedding, medicineEmbedding);
   }
 
-  bool _shouldExcludeMedicine(Map<String, dynamic> medicine) {
-    // Check health conditions
-    Map<String, bool> conditions = Map<String, bool>.from(_questionnaireData!['healthConditions']);
-    for (var entry in conditions.entries) {
-      if (entry.value) {
-        String condition = entry.key.toLowerCase();
-        String contraindications = medicine['contraindication'].toString().toLowerCase();
-        
-        if (_hasContraindication(condition, contraindications)) {
-          return true;
-        }
-      }
-    }
-
-    // Check allergies
-    if (_questionnaireData!['hasAllergies'] == 'Yes') {
-      List<String> allergyTerms = _questionnaireData!['allergies']
-          .toLowerCase()
-          .split(',')
-          .map((term) => term.trim())
-          .where((term) => term.isNotEmpty)
-          .toList();
-
-      String medicineIngredients = '''
-        ${medicine['activeIngredient']} 
-        ${medicine['genericName']}
-      '''.toLowerCase();
-
-      if (allergyTerms.any((allergy) => medicineIngredients.contains(allergy))) {
-        return true;
-      }
-    }
-
-    // Check alcohol interactions
-    if (_questionnaireData!['drinking'] == 'Yes') {
-      bool hasAlcoholInteraction = medicine['interactions']?.any((interaction) =>
-        interaction.toString().toLowerCase().contains('alcohol')
-      ) ?? false;
-
-      if (hasAlcoholInteraction) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  // Add this method after the _shouldExcludeMedicine method
-  bool _hasContraindication(String condition, String contraindications) {
-    // Common condition keywords mapping
-    Map<String, List<String>> conditionKeywords = {
-      'high blood pressure': ['hypertension', 'high blood pressure', 'blood pressure'],
-      'diabetes': ['diabetes', 'blood sugar', 'glucose', 'G6PD'],
-      'heart disease': ['heart', 'cardiac', 'cardiovascular'],
-      'asthma': ['asthma', 'respiratory', 'breathing', 'breathing difficulties'],
-      'liver disease': ['liver', 'hepatic'],
-      'kidney disease': ['kidney', 'renal'],
-      'allergies': ['allergy', 'allergic'],
-      'pregnant': ['pregnancy', 'pregnant', 'gestation', 'fetus', 'childbearing'],
-      'ulcer': ['ulcer', 'gastric', 'stomach bleeding'],
-      'bleeding disorder': ['bleeding', 'blood clotting', 'coagulation'],
-    };
-
-    // Get keywords for the condition
-    List<String> keywords = conditionKeywords[condition] ?? [condition];
-
-    // Check if any keyword matches in contraindications
-    return keywords.any((keyword) => contraindications.contains(keyword));
+  List<String> _processText(String text) {
+    return text
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^\w\s]'), ' ')
+        .split(RegExp(r'\s+'))
+        .where((word) => word.isNotEmpty)
+        .toList();
   }
 
   int _countMatchingSymptoms(Map<String, dynamic> medicine) {
     int count = 0;
     Map<String, bool> symptoms = Map<String, bool>.from(_questionnaireData!['symptoms']);
+    List<String> medicineCategories = List<String>.from(medicine['categories'])
+        .map((c) => c.toString().toLowerCase())
+        .toList();
+    List<String> medicineIndications = List<String>.from(medicine['indications'] ?? [])
+        .map((i) => i.toString().toLowerCase())
+        .toList();
     
     symptoms.forEach((symptom, hasSymptom) {
       if (hasSymptom && symptom != 'Other') {
-        List<String>? categories = symptomToCategoryMap[symptom];
-        if (categories != null && 
-            medicine['categories'].any((category) => 
-              categories.any((c) => c.toLowerCase() == category.toString().toLowerCase()))) {
+        // First check exact symptom match in indications
+        if (medicineIndications.any((indication) => 
+            indication.toLowerCase().contains(symptom.toLowerCase()))) {
           count++;
+          return;
+        }
+
+        // Then check category match through symptom map
+        List<String>? categories = symptomToCategoryMap[symptom]
+            ?.map((c) => c.toLowerCase())
+            .toList();
+        
+        if (categories != null) {
+          // Check if ANY of the medicine's categories match ANY of the symptom's categories
+          if (medicineCategories.any((medicineCategory) =>
+              categories.any((mappedCategory) => 
+                mappedCategory.toLowerCase() == medicineCategory))) {
+            count++;
+          }
         }
       }
     });
 
+    // Handle 'Other' symptoms
+    if (symptoms['Other'] == true && 
+        _questionnaireData!['otherSymptoms'].isNotEmpty) {
+      String otherSymptom = _questionnaireData!['otherSymptoms'].toLowerCase();
+      
+      // First check direct indication match
+      if (medicineIndications.any((indication) => 
+          indication.contains(otherSymptom))) {
+        count++;
+      } else {
+        // Then check through symptom map for known similar symptoms
+        symptomToCategoryMap.forEach((knownSymptom, categories) {
+          if (knownSymptom.toLowerCase().contains(otherSymptom) || 
+              otherSymptom.contains(knownSymptom.toLowerCase())) {
+            if (categories.any((category) => 
+                medicineCategories.contains(category.toLowerCase()))) {
+              count++;
+            }
+          }
+        });
+      }
+    }
+
     return count;
+  }
+
+  void _handleComplete(Map<String, dynamic> data) {
+    setState(() {
+      // Ensure all required fields are present with default values
+      _questionnaireData = {
+        'vitals': {
+          'temperature': data['vitals']?['temperature'] ?? '37.0',
+          'temperatureUnit': data['vitals']?['temperatureUnit'] ?? '°C',
+          'bloodPressure': data['vitals']?['bloodPressure'] ?? '120/80',
+        },
+        'symptoms': data['symptoms'] ?? {'Other': false},
+        'otherSymptoms': data['otherSymptoms'] ?? '',
+        'symptomsDuration': data['symptomsDuration'] ?? 'Less than a day',
+        'healthConditions': data['healthConditions'] ?? {
+          'diabetes': false,
+          'high blood pressure': false,
+          'heart disease': false,
+          'asthma': false,
+        },
+        'takingMedications': data['takingMedications'] ?? 'No',
+        'currentMedications': data['currentMedications'] ?? '',
+        'hasAllergies': data['hasAllergies'] ?? 'No',
+        'allergies': data['allergies'] ?? '',
+        'smoking': data['smoking'] ?? 'No',
+        'drinking': data['drinking'] ?? 'No',
+        'isPregnant': data['isPregnant'] ?? false,
+        'pregnancyTrimester': data['pregnancyTrimester'] ?? '',
+      };
+      _showMedicines = true;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return Scaffold(
-        appBar: AppBar(
-          automaticallyImplyLeading: widget.showBackButton,
-          title: Text(
-            'Health Questionnaire',
-            style: TextStyle(
-              color:  Colors.blue.withOpacity(1),
-              fontWeight: FontWeight.bold,
-              fontSize: 20,  // Added for better visibility
-            ),
-          ),
-        ),
-        body: Center(child: CircularProgressIndicator()),
-      );
-    }
-
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: widget.showBackButton,
         title: Text(
           'Health Questionnaire',
           style: TextStyle(
-            color:  Colors.blue.withOpacity(1),
+            color: Colors.blue.withOpacity(1),
             fontWeight: FontWeight.bold,
-            fontSize: 20,  // Added for better visibility
+            fontSize: 20,
           ),
         ),
       ),
-      body: !_showMedicines
-        ? _userData == null
-          ? Center(child: Text('Unable to load user data'))
-          : HealthQuestionnaire(
-              onComplete: (data) {
-                setState(() {
-                  _questionnaireData = data;
-                  _showMedicines = true;
-                });
-              },
-              initialData: widget.reminderData != null ? {
-                'takingMedications': 'Yes',
-                'currentMedications': '${widget.reminderData!['medicine']['name']} (${widget.reminderData!['medicine']['genericName']})',
-              } : null,
-              reminderData: widget.reminderData,  // Add this line
-              userData: _userData!,
-            )
-        : _buildMedicinesList(),
+      body: _buildBody(),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_isLoading) {
+      return Center(child: CircularProgressIndicator());
+    }
+
+    if (!_showMedicines) {
+      // Always show questionnaire even if userData is null
+      return HealthQuestionnaire(
+        onComplete: _handleComplete,
+        initialData: widget.reminderData != null ? {
+          'takingMedications': 'Yes',
+          'currentMedications': '${widget.reminderData!['medicine']['name']} (${widget.reminderData!['medicine']['genericName']})',
+        } : null,
+        reminderData: widget.reminderData,
+        userData: _userData ?? _getDefaultUserData(),  // Add fallback
+      );
+    }
+
+    return _buildMedicinesList();
+  }
+
+  // Add this helper method for default user data
+  UserData _getDefaultUserData() {
+    return UserData(
+      id: '',
+      username: '',
+      name: 'New User',
+      birthdate: DateTime.now().toString(),
+      age: 0,
+      sex: 'Male',
+      height: 0,
+      weight: 0,
     );
   }
 
   Widget _buildMedicinesList() {
-    List<Map<String, dynamic>> filteredMedicines = getFilteredMedicines();
-    
-    return SingleChildScrollView(
-      child: Padding(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Add OTC disclaimer
-            Container(
-              padding: EdgeInsets.all(12),
-              decoration: BoxDecoration(
-              color: Colors.yellow.shade50,
-              borderRadius: BorderRadius.circular(8),
-              ),
-              child: Column(
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: getFilteredMedicines(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return Center(child: CircularProgressIndicator());
+        }
+
+        if (snapshot.hasError) {
+          return Center(
+            child: Text('Error loading recommendations: ${snapshot.error}'),
+          );
+        }
+
+        final filteredMedicines = snapshot.data ?? [];
+        bool showWarningMessage = _questionnaireData != null && 
+                                _questionnaireData!['symptomsDuration'] == 'More than 3 days';
+
+        if (filteredMedicines.isEmpty) {
+          return _buildEmptyState(showWarningMessage);
+        }
+
+        // Group medicines by classification
+        final groupedMedicines = _groupMedicinesByClassification(filteredMedicines);
+
+        return SingleChildScrollView(
+          child: Padding(
+            padding: EdgeInsets.all(16),
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                'Over-the-Counter Medicines Only',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.yellow.shade900,
-                ),
-                ),
-                SizedBox(height: 4),
-                Text(
-                'These recommendations are limited to OTC medicines. If symptoms persist and for serious conditions, please consult a healthcare professional.',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Colors.yellow.shade900,
-                ),
-                ),
-              ],
-              ),
-            ),
-            SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-              Text('Recommended Medicines', 
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-              TextButton(
-                onPressed: () => setState(() => _showMedicines = false),
-                child: Text('Edit Questionnaire'),
-              ),
-              ],
-            ),
-            SizedBox(height: 8),
-            Container(
-              padding: EdgeInsets.all(12),
-              decoration: BoxDecoration(
-              color: Colors.yellow.shade50,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.yellow.shade700),
-              ),
-              child: Row(
-              children: [
-                Icon(Icons.warning_amber, color: Colors.yellow.shade900),
-                SizedBox(width: 8),
-                Expanded(
-                child: Text(
-                  'Please choose and take only ONE medicine from the recommendations to avoid potential drug interactions.',
-                  style: TextStyle(
-                  color: Colors.yellow.shade900,
-                  fontWeight: FontWeight.w500,
+                _buildOTCDisclaimer(),
+                SizedBox(height: 16),
+                _buildHeader(),
+                SizedBox(height: 8),
+                _buildWarningMessage(),
+                SizedBox(height: 16),
+                // Add current medicine warning
+                _buildCurrentMedicineWarning(),
+                // Show classifications
+                ...groupedMedicines.entries.map((entry) => 
+                  Column(
+                    children: [
+                      _buildClassificationMedicines(entry.key, entry.value),
+                      SizedBox(height: 8),
+                    ],
                   ),
-                ),
-                ),
-              ],
-              ),
-            ),
-            SizedBox(height: 16),
-            if (filteredMedicines.isEmpty)
-              Center(
-                child: Column(
-                  children: [
-                    Icon(Icons.warning, size: 48, color: Colors.red),
-                    SizedBox(height: 16),
-                    if (_questionnaireData!['symptomsDuration'] == 'More than 3 days')
-                      Column(
-                        children: [
-                          Text(
-                            'Symptoms persisting for more than 3 days',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.red,
-                            ),
-                          ),
-                          SizedBox(height: 8),
-                          Text(
-                            'Please consult a healthcare professional immediately. Prolonged symptoms may indicate a condition that requires medical attention.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 16),
-                          ),
-                        ],
-                      )
-                    else if (_hasHealthConditions())
-                      Column(
-                        children: [
-                          Text(
-                            'Based on your health conditions:',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.red,
-                            ),
-                          ),
-                          SizedBox(height: 8),
-                          ..._getHealthConditionsWarnings(),
-                          SizedBox(height: 16),
-                          Text(
-                            'Please consult a healthcare professional for appropriate medication.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 16),
-                          ),
-                        ],
-                      )
-                    else
-                      Text(
-                        'No suitable medicines found based on your health profile.\nPlease consult a healthcare professional.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(fontSize: 16),
-                      ),
-                  ],
-                ),
-              )
-            else
-              ListView.builder(
-                shrinkWrap: true,
-                physics: NeverScrollableScrollPhysics(),
-                itemCount: filteredMedicines.length,
-                itemBuilder: (context, index) {
-                  final medicine = filteredMedicines[index];
-                  return Card(
-                    margin: EdgeInsets.only(bottom: 12),
-                    child: ListTile(
-                      leading: Image.asset(medicine['image'], width: 50, height: 50),
-                      title: Text(medicine['name']),
-                      subtitle: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(medicine['genericName']),
-                          Text(
-                            'Matches your symptoms: ${_getMatchingSymptoms(medicine)}',
-                            style: TextStyle(fontSize: 12, color: Colors.green),
-                          ),
-                        ],
-                      ),
-                      onTap: () => _showDosageForm(medicine),
-                    ),
-                  );
-                },
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  bool _hasHealthConditions() {
-    return (_questionnaireData?['healthConditions'] as Map<String, bool>?)
-        ?.values
-        ?.any((condition) => condition) ?? false;
-  }
-
-  List<Widget> _getHealthConditionsWarnings() {
-    List<Widget> warnings = [];
-    Map<String, bool> conditions = Map<String, bool>.from(_questionnaireData!['healthConditions']);
-    
-    conditions.forEach((condition, hasCondition) {
-      if (hasCondition) {
-        warnings.add(
-          Padding(
-            padding: EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.warning_amber, color: Colors.orange, size: 20),
-                SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _getConditionWarning(condition),
-                    style: TextStyle(color: Colors.red[700]),
-                  ),
-                ),
+                ).toList(),
               ],
             ),
           ),
         );
-      }
-    });
+      },
+    );
+  }
+
+  Map<String, List<Map<String, dynamic>>> _groupMedicinesByClassification(List<Map<String, dynamic>> medicines) {
+    Map<String, List<Map<String, dynamic>>> grouped = {};
     
-    return warnings;
-  }
-
-  String _getConditionWarning(String condition) {
-    switch (condition.toLowerCase()) {
-      case 'diabetes':
-        return 'Some medications may affect blood sugar levels';
-      case 'high blood pressure':
-        return 'Many cold and pain medications can increase blood pressure';
-      case 'heart disease':
-        return 'Several common medications may affect heart conditions';
-      case 'asthma':
-        return 'Some pain relievers may trigger asthma symptoms';
-      default:
-        return '$condition may affect medication choices';
-    }
-  }
-
-  String _getMatchingSymptoms(Map<String, dynamic> medicine) {
-    Set<String> matchingSymptoms = {};
-    Map<String, bool> symptoms = Map<String, bool>.from(_questionnaireData!['symptoms']);
-
-    // Handle regular symptoms first
-    symptoms.entries
-        .where((e) => e.value == true && e.key != 'Other')
-        .forEach((e) {
-          List<String> mappedCategories = symptomToCategoryMap[e.key] ?? [];
-          if (medicine['categories'].any((category) => 
-              mappedCategories.any((mapped) => 
-                mapped.toLowerCase() == category.toString().toLowerCase()
-              ))) {
-            matchingSymptoms.add(e.key);
-          }
-        });
-
-    // Enhanced handling of "Other" symptoms
-    if (symptoms['Other'] == true && _questionnaireData!['otherSymptoms'].isNotEmpty) {
-      String otherSymptom = _questionnaireData!['otherSymptoms'].toLowerCase();
-      
-      // First try exact matches
-      symptomToCategoryMap.forEach((symptom, categories) {
-        if (otherSymptom.contains(symptom.toLowerCase())) {
-          if (categories.any((category) => 
-            medicine['categories'].any((medCategory) => 
-              medCategory.toString().toLowerCase() == category.toLowerCase()
-            ))) {
-            matchingSymptoms.add(symptom);
-          }
+    for (var medicine in medicines) {
+      List<String> classifications = List<String>.from(medicine['classification']);
+      for (var classification in classifications) {
+        if (!grouped.containsKey(classification)) {
+          grouped[classification] = [];
         }
-      });
-
-      // Special handling for flu/influenza keywords
-      if (otherSymptom.contains('flu') || otherSymptom.contains('influenza')) {
-        if (medicine['categories'].any((category) => 
-            ['Cold', 'Flu', 'Fever'].contains(category.toString()))) {
-          matchingSymptoms.add('Flu symptoms');
+        if (!grouped[classification]!.contains(medicine)) {
+          grouped[classification]!.add(medicine);
         }
       }
     }
 
-    return matchingSymptoms.isEmpty ? 'No matching symptoms' : matchingSymptoms.join(', ');
+    // Sort medicines within each classification by total score
+    grouped.forEach((classification, medicineList) {
+      medicineList.sort((a, b) => (b['totalScore']).compareTo(a['totalScore']));
+    });
+
+    // Sort classifications alphabetically
+    Map<String, List<Map<String, dynamic>>> sortedGrouped = Map.fromEntries(
+      grouped.entries.toList()..sort((a, b) => a.key.compareTo(b.key))
+    );
+
+    return sortedGrouped;
   }
 
-  bool _hasCheckedSymptoms() => _questionnaireData!['symptoms'].values.any((checked) => checked);
+  Widget _buildClassificationMedicines(String classification, List<Map<String, dynamic>> medicines) {
+    return ExpansionTile(
+      title: Text(
+        '$classification (${medicines.length})',
+        style: TextStyle(
+          fontWeight: FontWeight.bold,
+          color: Colors.blue.shade700,
+        ),
+      ),
+      children: medicines.map((medicine) => Card(
+        margin: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        child: ListTile(
+          leading: Image.asset(medicine['image'], width: 50, height: 50),
+          title: Text(
+            medicine['name'],
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(medicine['genericName']),
+              Text(
+                'Matches your symptoms: ${_getMatchingSymptoms(medicine)}',
+                style: TextStyle(fontSize: 12, color: Colors.green),
+              ),
+            ],
+          ),
+          onTap: () => _showDosageForm(medicine),
+        ),
+      )).toList(),
+    );
+  }
+
+  Widget _buildEmptyState(bool showWarningMessage) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.warning, size: 48, color: Colors.red),
+          SizedBox(height: 16),
+          if (showWarningMessage) ...[
+            Text(
+              'Symptoms persisting for more than 3 days',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+          color: Colors.red,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Please consult a healthcare professional immediately.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 16),
+            ),
+          ] else
+            Text(
+              'No suitable medications found for your symptoms.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 16),
+            ),
+          SizedBox(height: 24),
+          Container(
+            width: 200, // Set fixed width for button
+            child: ElevatedButton.icon(
+              onPressed: _generateHealthReport,
+              icon: Icon(Icons.picture_as_pdf, color: Colors.white),
+              label: Text('Save Health Report', style: TextStyle(color: Colors.white)),
+              style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.red,
+          padding: EdgeInsets.symmetric(vertical: 16),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOTCDisclaimer() {
+    return Container(
+      padding: EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.yellow.shade50,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Over-the-Counter Medicines Only',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Colors.yellow.shade900,
+            ),
+          ),
+          SizedBox(height: 4),
+          Text(
+            'These recommendations are limited to OTC medicines. If symptoms persist and for serious conditions, please consult a healthcare professional.',
+            style: TextStyle(
+              fontSize: 14,
+              color: Colors.yellow.shade900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          'Recommended Medicines',
+          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+        TextButton(
+          onPressed: () => setState(() => _showMedicines = false),
+          child: Text('Edit Questionnaire'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildWarningMessage() {
+    return Container(
+      padding: EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.yellow.shade50,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.yellow.shade700),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.warning_amber, color: Colors.yellow.shade900),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Please choose and take only ONE medicine from the recommendations to avoid potential drug interactions.',
+              style: TextStyle(
+                color: Colors.yellow.shade900,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCurrentMedicineWarning() {
+    if (widget.reminderData == null) return SizedBox.shrink();
+
+    return Container(
+      margin: EdgeInsets.only(bottom: 16),
+      padding: EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.blue.shade50,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.blue.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.info_outline, color: Colors.blue.shade700),
+              SizedBox(width: 8),
+              Text(
+                'Current Medicine',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blue.shade700,
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: 8),
+          Text(
+            'You are currently taking ${widget.reminderData!['medicine']['name']} (${widget.reminderData!['medicine']['genericName']}). '
+            'Only medicines that are safe to take together are shown below.',
+            style: TextStyle(color: Colors.blue.shade700),
+          ),
+        ],
+      ),
+    );
+  }
 
   void _showDosageForm(Map<String, dynamic> medicine) {
-    // Update the needsSpecificTiming logic
     bool needsSpecificTiming = true;
     String directions = medicine['directions of use'].toString().toLowerCase();
     
-    // Only set to false if it's purely "as needed" without specific timing
     if ((directions.contains('as needed') || 
          directions.contains('when needed')) &&
         !directions.contains('every') &&
@@ -1076,7 +1052,6 @@ class _MedicinesScreenState extends State<MedicinesScreen> {
       needsSpecificTiming = false;
     }
 
-    // Also respect explicit setting if present
     if (medicine.containsKey('needsSpecificTiming')) {
       needsSpecificTiming = medicine['needsSpecificTiming'];
     }
@@ -1117,6 +1092,446 @@ class _MedicinesScreenState extends State<MedicinesScreen> {
     setState(() => _selectedMedicine = medicine);
   }
   
+  Future<Map<String, dynamic>?> _getHealthData() async {
+    try {
+      if (_userData == null) return null;
+      
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(_userData!.id)
+          .get();
+
+      if (!doc.exists) return null;
+
+      final Map<String, dynamic> data = Map<String, dynamic>.from(doc.data()?['initialHealth'] ?? {});
+      
+      if (data['healthConditions'] != null) {
+        data['healthConditions'] = Map<String, bool>.from(data['healthConditions']);
+      }
+
+      return data;
+    } catch (e) {
+      print('Error loading health data: $e');
+      return null;
+    }
+  }
+
+  Future<void> _generateHealthReport() async {
+    try {
+      final healthData = await _getHealthData();
+      if (healthData == null) {
+        throw Exception('Could not load health data');
+      }
+
+      final pdf = pw.Document(
+        theme: pw.ThemeData.base(),
+      );
+    
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4,
+          margin: pw.EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          header: (context) {
+            return pw.Container(
+              padding: pw.EdgeInsets.only(bottom: 10),
+              child: pw.Column(
+                children: [
+                  pw.Text(
+                    'HEALTH ASSESSMENT REPORT',
+                    style: pw.TextStyle(fontSize: 18),
+                    textAlign: pw.TextAlign.center,
+                  ),
+                  pw.SizedBox(height: 2),
+                  pw.Text(
+                    DateTime.now().toString().split('.')[0],
+                    style: pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+                    textAlign: pw.TextAlign.center,
+                  ),
+                  pw.Divider(thickness: 1),
+                ],
+              ),
+            );
+          },
+          build: (context) => [
+            pw.Row(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Expanded(
+                  child: pw.Column(
+                    children: [
+                      _buildPDFSection('Personal Information', [
+                        _buildPDFRow('Name', _userData!.name),
+                        _buildPDFRow('Age/Sex', '${_userData!.age}y/${_userData!.sex}'),
+                        _buildPDFRow('Height', '${_userData!.height} cm'),
+                        _buildPDFRow('Weight', '${_userData!.weight} kg'),
+                      ]),
+
+                      _buildPDFSection('Vital Signs', [
+                        _buildPDFRow('Temperature', 
+                          '${_questionnaireData!['vitals']['temperature']} ${_questionnaireData!['vitals']['temperatureUnit'].toString().replaceAll('°', '')}'),
+                        _buildPDFRow('Blood Pressure', 
+                          '${_questionnaireData!['vitals']['bloodPressure']} mmHg'),
+                      ]),
+
+                      _buildMedicalHistorySection(healthData),
+
+                      _buildPDFSection('Current Medications', [
+                        _buildPDFRow('Status', healthData['takingMedications'] ?? 'No'),
+                        if (healthData['takingMedications'] == 'Yes')
+                          _buildPDFRow('List', healthData['currentMedications'] ?? ''),
+                      ]),
+                    ],
+                  ),
+                ),
+
+                pw.SizedBox(width: 10),
+
+                pw.Expanded(
+                  child: pw.Column(
+                    children: [
+                      _buildPDFSection('Allergies', [
+                        _buildPDFRow('Status', healthData['hasAllergies'] ?? 'No'),
+                        if (healthData['hasAllergies'] == 'Yes')
+                          _buildPDFRow('List', healthData['allergies'] ?? ''),
+                      ]),
+
+                      _buildPDFSection('Lifestyle', [
+                        _buildPDFRow('Smoking', healthData['smoking'] ?? 'No'),
+                        _buildPDFRow('Alcohol', healthData['drinking'] ?? 'No'),
+                      ]),
+
+                      _buildPDFSection('Current Symptoms', [
+                        ...(_questionnaireData!['symptoms'] as Map<String, dynamic>)
+                            .entries
+                            .where((e) => e.value == true)
+                            .map((e) => _buildPDFRow('Symptom', e.key)),
+                        if (_questionnaireData!['symptoms']['Other'] == true)
+                          _buildPDFRow('Other', _questionnaireData!['otherSymptoms']),
+                        _buildPDFRow('Duration', _questionnaireData!['symptomsDuration']),
+                      ]),
+
+                      if (_userData!.sex == 'Female' && 
+                          _userData!.age >= 12 && 
+                          healthData['isPregnant'] == true)
+                        _buildPDFSection('Pregnancy', [
+                          _buildPDFRow('Status', 'Pregnant'),
+                          _buildPDFRow('Trimester', healthData['pregnancyTrimester'] ?? ''),
+                        ]),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+          footer: (context) {
+            return pw.Container(
+              decoration: pw.BoxDecoration(
+                border: pw.Border(top: pw.BorderSide(color: PdfColors.grey300))
+              ),
+              padding: pw.EdgeInsets.only(top: 5),
+              child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Text(
+                    'OTiCuRe Health Report',
+                    style: pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+                  ),
+                  pw.Text(
+                    'Page ${context.pageNumber} of ${context.pagesCount}',
+                    style: pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      );
+
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/health_report_${DateTime.now().millisecondsSinceEpoch}.pdf');
+      await file.writeAsBytes(await pdf.save());
+      await OpenFile.open(file.path);
+
+    } catch (e) {
+      print('Error generating health report: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error generating report: $e')),
+        );
+      }
+    }
+  }
+
+  pw.Widget _buildPDFSection(String title, List<pw.Widget> content) {
+    return pw.Container(
+      margin: pw.EdgeInsets.only(bottom: 10),
+      padding: pw.EdgeInsets.all(5),
+      decoration: pw.BoxDecoration(
+        border: pw.Border.all(color: PdfColors.grey300),
+        borderRadius: pw.BorderRadius.circular(4),
+      ),
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text(
+            title,
+            style: pw.TextStyle(
+              fontSize: 10,
+              color: PdfColors.blue800,
+            ),
+          ),
+          pw.Divider(color: PdfColors.grey300),
+          ...content,
+        ],
+      ),
+    );
+  }
+
+  pw.Widget _buildPDFRow(String label, String value) {
+    return pw.Container(
+      padding: pw.EdgeInsets.symmetric(vertical: 1),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Container(
+            width: 50,
+            child: pw.Text(
+              label,
+              style: pw.TextStyle(
+                fontSize: 8,
+                color: PdfColors.grey700,
+              ),
+            ),
+          ),
+          pw.Expanded(
+            child: pw.Text(
+              value,
+              style: pw.TextStyle(
+                fontSize: 8,
+                color: PdfColors.black,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  pw.Widget _buildMedicalHistorySection(Map<String, dynamic> healthData) {
+    final List<pw.Widget> content = [];
+    
+    try {
+      if (healthData.containsKey('healthConditions')) {
+        final conditions = Map<String, bool>.from(healthData['healthConditions']);
+        
+        conditions.forEach((condition, value) {
+          if (value == true) {
+            content.add(_buildPDFRow('Condition', condition));
+          }
+        });
+      }
+
+      if (content.isEmpty) {
+        content.add(_buildPDFRow('Status', 'No known conditions'));
+      }
+
+    } catch (e) {
+      print('Error building medical history section: $e');
+      content.add(_buildPDFRow('Error', 'Could not load medical history'));
+    }
+
+    return _buildPDFSection('Medical History', content);
+  }
+
+  // Add this method to get all active medicines
+  Future<List<Map<String, dynamic>>> _getAllActiveMedicines() async {
+    List<Map<String, dynamic>> activeMedicines = [];
+    try {
+      // Get current active medicine from storage
+      final activeMedicine = await ActiveMedicineManager.getActiveMedicine();
+      if (activeMedicine != null) {
+        activeMedicines.add(activeMedicine['medicine']);
+      }
+
+      // Get active medicines from Firebase
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('userId');
+      
+      if (userId != null) {
+        final reminders = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(userId)
+            .collection('reminders')
+            .get();
+
+        for (var doc in reminders.docs) {
+          final medicine = doc.data()['medicine'] as Map<String, dynamic>;
+          if (!activeMedicines.any((m) => _isSimilarMedicine(m, medicine))) {
+            activeMedicines.add(medicine);
+          }
+        }
+      }
+
+      return activeMedicines;
+    } catch (e) {
+      print('Error getting active medicines: $e');
+      return [];
+    }
+  }
+
+  // Add this method to check medicine similarity
+  bool _isSimilarMedicine(Map<String, dynamic> med1, Map<String, dynamic> med2) {
+    // Check exact matches
+    if (med1['name'] == med2['name'] || 
+        med1['genericName'] == med2['genericName']) {
+      return true;
+    }
+
+    // Normalize names for comparison
+    String name1 = med1['name'].toString().toLowerCase();
+    String name2 = med2['name'].toString().toLowerCase();
+    String generic1 = med1['genericName'].toString().toLowerCase();
+    String generic2 = med2['genericName'].toString().toLowerCase();
+
+    // Check for substring matches
+    if (name1.contains(generic2) || name2.contains(generic1) ||
+        generic1.contains(name2) || generic2.contains(name1)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  // Add this method to check interaction risks
+  bool _hasInteractionRisk(Map<String, dynamic> med1, Map<String, dynamic> med2) {
+    List<String> interactions1 = List<String>.from(med1['interactions'] ?? [])
+        .map((i) => i.toString().toLowerCase())
+        .toList();
+    
+    List<String> interactions2 = List<String>.from(med2['interactions'] ?? [])
+        .map((i) => i.toString().toLowerCase())
+        .toList();
+
+    // Check if med2's name or generic name appears in med1's interactions
+    String med2Name = med2['name'].toString().toLowerCase();
+    String med2Generic = med2['genericName'].toString().toLowerCase();
+
+    for (var interaction in interactions1) {
+      if (interaction.contains(med2Name) || interaction.contains(med2Generic)) {
+        return true;
+      }
+    }
+
+    // Check if med1's name or generic name appears in med2's interactions
+    String med1Name = med1['name'].toString().toLowerCase();
+    String med1Generic = med1['genericName'].toString().toLowerCase();
+
+    for (var interaction in interactions2) {
+      if (interaction.contains(med1Name) || interaction.contains(med1Generic)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  // Add this method to check exclusion criteria
+  bool _hasExclusionCriteria(Map<String, dynamic> medicine, Map<String, dynamic> healthData) {
+    // Check health conditions
+    Map<String, bool> conditions = Map<String, bool>.from(healthData['healthConditions']);
+    String contraindications = medicine['contraindication'].toString().toLowerCase();
+    
+    for (var entry in conditions.entries) {
+      if (entry.value && contraindications.contains(entry.key.toLowerCase())) {
+        return true;
+      }
+    }
+
+    // Check allergies
+    if (healthData['hasAllergies'] == 'Yes') {
+      String allergies = healthData['allergies'].toString().toLowerCase();
+      String ingredients = medicine['activeIngredient'].toString().toLowerCase();
+      
+      if (allergies.split(',').any((allergy) => 
+          ingredients.contains(allergy.trim()))) {
+        return true;
+      }
+    }
+
+    // Check pregnancy
+    if (healthData['isPregnant'] == true && 
+        contraindications.contains('pregnan')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  // Add this method to get matching symptoms
+  String _getMatchingSymptoms(Map<String, dynamic> medicine) {
+    Set<String> matchingSymptoms = {};
+    Map<String, bool> symptoms = Map<String, bool>.from(_questionnaireData!['symptoms']);
+    List<String> medicineCategories = List<String>.from(medicine['categories'])
+        .map((c) => c.toString().toLowerCase())
+        .toList();
+    List<String> medicineIndications = List<String>.from(medicine['indications'] ?? [])
+        .map((i) => i.toString().toLowerCase())
+        .toList();
+
+    symptoms.forEach((symptom, hasSymptom) {
+      if (hasSymptom && symptom != 'Other') {
+        // First check exact symptom match in indications
+        if (medicineIndications.any((indication) => 
+            indication.contains(symptom.toLowerCase()))) {
+          matchingSymptoms.add(symptom);
+          return;
+        }
+
+        // Then check category match through symptom map
+        List<String>? categories = symptomToCategoryMap[symptom]
+            ?.map((c) => c.toLowerCase())
+            .toList();
+        
+        if (categories != null) {
+          // Check if ANY of the medicine's categories match ANY of the symptom's categories
+          if (medicineCategories.any((medicineCategory) =>
+              categories.any((mappedCategory) => 
+                mappedCategory.toLowerCase() == medicineCategory))) {
+            matchingSymptoms.add(symptom);
+          }
+        }
+      }
+    });
+
+    if (symptoms['Other'] == true && 
+        _questionnaireData!['otherSymptoms'].isNotEmpty) {
+      String otherSymptom = _questionnaireData!['otherSymptoms'].toLowerCase();
+      
+      // First check direct indication match
+      if (medicineIndications.any((indication) => 
+          indication.contains(otherSymptom))) {
+        matchingSymptoms.add(otherSymptom);
+      } else {
+        // Then check through symptom map for known similar symptoms
+        bool foundMatch = false;
+        symptomToCategoryMap.forEach((knownSymptom, categories) {
+          if (!foundMatch && 
+              knownSymptom.toLowerCase().contains(otherSymptom) || 
+              otherSymptom.contains(knownSymptom.toLowerCase())) {
+            if (categories.any((category) => 
+                medicineCategories.contains(category.toLowerCase()))) {
+              matchingSymptoms.add(knownSymptom);
+              foundMatch = true;
+            }
+          }
+        });
+      }
+    }
+
+    return matchingSymptoms.isEmpty ? 'No matching symptoms' 
+                                  : matchingSymptoms.join(', ');
+  }
+
   @override
   void dispose() {
     super.dispose();

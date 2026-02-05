@@ -33,29 +33,82 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _loadUserData() async {
     try {
-      // Get the stored user ID from SharedPreferences
       final prefs = await SharedPreferences.getInstance();
       final String? userId = prefs.getString('userId');
+      final String username = prefs.getString('username') ?? '';
+      final String name = prefs.getString('name') ?? 'User';
+      final String sex = prefs.getString('sex') ?? 'Not specified';
+      final int age = prefs.getInt('age') ?? 0;
 
       if (userId == null || userId.isEmpty) {
         print('No user ID found');
-        setState(() => _isLoading = false);
+        setState(() {
+          _userData = UserData(
+            id: '',
+            username: username.isNotEmpty ? username : 'New User',
+            name: name.isNotEmpty ? name : 'User',
+            birthdate: DateTime.now().toString(),
+            age: age,
+            sex: sex,
+            height: 0,
+            weight: 0,
+          );
+          _isLoading = false;
+        });
         return;
       }
       
-      final userData = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(userId)
-          .get();
+      try {
+        final userData = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(userId)
+            .get();
 
-      if (userData.exists) {
+        if (userData.exists) {
+          setState(() {
+            _userData = UserData.fromMap(userData.data()!);
+            _isLoading = false;
+          });
+        } else {
+          // Create a new user document if it doesn't exist
+          final newUserData = UserData(
+            id: userId,
+            username: username.isNotEmpty ? username : 'New User',
+            name: name.isNotEmpty ? name : 'User',
+            birthdate: DateTime.now().toString(),
+            age: age,
+            sex: sex,
+            height: 0,
+            weight: 0,
+          );
+
+          // Save to Firestore
+          await FirebaseFirestore.instance
+              .collection('users')
+              .doc(userId)
+              .set(newUserData.toMap());
+
+          setState(() {
+            _userData = newUserData;
+            _isLoading = false;
+          });
+        }
+      } catch (e) {
+        print('Firestore error: $e');
+        // Fallback to local data if Firestore fails
         setState(() {
-          _userData = UserData.fromMap(userData.data()!);
+          _userData = UserData(
+            id: userId,
+            username: username.isNotEmpty ? username : 'New User',
+            name: name.isNotEmpty ? name : 'User',
+            birthdate: DateTime.now().toString(),
+            age: age,
+            sex: sex,
+            height: 0,
+            weight: 0,
+          );
           _isLoading = false;
         });
-      } else {
-        print('No user data found for ID: $userId');
-        setState(() => _isLoading = false);
       }
     } catch (e) {
       print('Error loading user data: $e');

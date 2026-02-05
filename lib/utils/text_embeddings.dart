@@ -41,8 +41,15 @@ class TextEmbeddings {
       // TF-IDF calculation
       double tf = count / documentLength;
       double idf = log(vocabularySize / docsWithTerm);
+      double tfidf = tf * idf;
       
-      embedding[word] = tf * idf;
+      print('Word: $word');
+      print('  TF: ${tf.toStringAsFixed(4)}');
+      print('  IDF: ${idf.toStringAsFixed(4)}');
+      print('  TF-IDF: ${tfidf.toStringAsFixed(4)}');
+      print('-------------------');
+      
+      embedding[word] = tfidf;
     });
 
     return embedding;
@@ -83,4 +90,30 @@ class TextEmbeddings {
         .replaceAll(RegExp(r'[^\w\s]'), '')
         .trim();
   }
+  static Map<String, double> getWeightedMedicineEmbedding(Map<String, dynamic> medicine, List<String> vocabulary) {
+    final Map<String, double> fieldWeights = {
+      'description': 0.4,
+      'activeIngredient': 0.3,
+      'indications': 0.2,
+      'name': 0.1,
+    };
+
+    Map<String, double> combinedEmbedding = {};
+
+    fieldWeights.forEach((field, weight) {
+      if (medicine[field] != null) {
+        var fieldEmbedding = getTextEmbedding(medicine[field].toString(), vocabulary);
+        fieldEmbedding.forEach((word, score) {
+          combinedEmbedding.update(
+            word,
+            (value) => value + (score * weight),
+            ifAbsent: () => score * weight
+          );
+        });
+      }
+    });
+
+    return combinedEmbedding;
+  }
+
 }

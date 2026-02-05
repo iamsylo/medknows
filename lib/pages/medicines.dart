@@ -32,7 +32,8 @@ const List<Map<String, dynamic>> medicines = [
       'celecoxib',
       'meloxicam'
     ],
-    'activeIngredient': 'ibuprofen'
+    'activeIngredient': 'ibuprofen',
+    'classification': ['Analgesic', 'NSAID']
   },
 
   {
@@ -65,7 +66,8 @@ const List<Map<String, dynamic>> medicines = [
       'paracetamol',
       'acetaminophen'
     ],
-    'activeIngredient': 'ibuprofen, paracetamol'
+    'activeIngredient': 'ibuprofen, paracetamol',
+    'classification': ['Analgesic', 'NSAID', 'Antipyretic']
   },
 
   {
@@ -88,7 +90,8 @@ const List<Map<String, dynamic>> medicines = [
       'albuterol',
       'theophylline'
     ],
-    'activeIngredient': 'lagundi leaf extract'
+    'activeIngredient': 'lagundi leaf extract',
+    'classification': ['Antitussive']
   },
 
   {
@@ -133,7 +136,8 @@ const List<Map<String, dynamic>> medicines = [
       'paracetamol',
       'acetaminophen'
     ],
-    'activeIngredient': 'phenylephrine, chlorphenamine, paracetamol'
+    'activeIngredient': 'phenylephrine, chlorphenamine, paracetamol',
+    'classification': ['Decongestant', 'Antihistamine', 'Analgesic']
   },
 
   {
@@ -142,7 +146,7 @@ const List<Map<String, dynamic>> medicines = [
     'categories': [
       'Fever',
       'Headache',
-      'Pain Reliever'
+      'Pain Reliever',
       'flu'
     ],
     'image': 'assets/images/medicines/biogesic.png',
@@ -164,7 +168,8 @@ const List<Map<String, dynamic>> medicines = [
       'acetaminophen',
       'paracetamol'
     ],
-    'activeIngredient': 'paracetamol'
+    'activeIngredient': 'paracetamol',
+    'classification': ['Analgesic', 'Antipyretic']
   },
 
   {
@@ -214,7 +219,8 @@ const List<Map<String, dynamic>> medicines = [
       'paracetamol',
       'acetaminophen'
     ],
-    'activeIngredient': 'hyoscine N-butylbromide, paracetamol'
+    'activeIngredient': 'hyoscine N-butylbromide, paracetamol',
+    'classification': ['Anticholinergic', 'Antispasmodic', 'Analgesic']
   },
 
   {
@@ -229,7 +235,8 @@ const List<Map<String, dynamic>> medicines = [
     'contraindication': 'Hypersensitivity to any component, severe hypertension.',
     'ageRestriction': '12',
     'interactions': ['MAOIs', 'alcohol', 'sedatives', 'paracetamol'],
-    'activeIngredient': 'phenylephrine, chlorphenamine, paracetamol'
+    'activeIngredient': 'phenylephrine, chlorphenamine, paracetamol',
+    'classification': ['Decongestant', 'Antihistamine', 'Analgesic']
   },
 
   {
@@ -256,7 +263,8 @@ const List<Map<String, dynamic>> medicines = [
       'gaviscon',
       'tums'
     ],
-    'activeIngredient': 'loperamide hydrochloride'
+    'activeIngredient': 'loperamide hydrochloride',
+    'classification': ['Antidiarrheal']
   },
 
   {
@@ -291,7 +299,8 @@ const List<Map<String, dynamic>> medicines = [
       'fluticasone',
       'montelukast'
     ],
-    'activeIngredient': 'naproxen sodium'
+    'activeIngredient': 'naproxen sodium',
+    'classification': ['Analgesic', 'NSAID']
   },
 
   {
@@ -317,7 +326,8 @@ const List<Map<String, dynamic>> medicines = [
       'moxifloxacin',
       'ofloxacin'
     ],
-    'activeIngredient': 'aluminum hydroxide, magnesium hydroxide, simethicone'
+    'activeIngredient': 'aluminum hydroxide, magnesium hydroxide, simethicone',
+    'classification': ['Antacid', 'Antiflatulent']
   },
 
   {
@@ -343,7 +353,8 @@ const List<Map<String, dynamic>> medicines = [
       'ofloxacin',
       'digoxin'
     ],
-    'activeIngredient': 'aluminum hydroxide, magnesium hydroxide, simethicone, calcium carbonate'
+    'activeIngredient': 'aluminum hydroxide, magnesium hydroxide, simethicone, calcium carbonate',
+    'classification': ['Antacid', 'Antiflatulent']
   },
 
   {
@@ -371,7 +382,8 @@ const List<Map<String, dynamic>> medicines = [
       'hydrochlorothiazide',
       'spironolactone'
     ],
-    'activeIngredient': 'ibuprofen'
+    'activeIngredient': 'ibuprofen',
+    'classification': ['Analgesic', 'NSAID']
   },
 
   {
@@ -392,7 +404,8 @@ const List<Map<String, dynamic>> medicines = [
       'sinecod',
       'robitussin'
     ],
-    'activeIngredient': 'ambroxol hydrochloride'
+    'activeIngredient': 'ambroxol hydrochloride',
+    'classification': ['Mucolytic']
   },
 
   {
@@ -400,7 +413,7 @@ const List<Map<String, dynamic>> medicines = [
     'genericName': 'Phenylephrine + Chlorphenamine + Paracetamol + Zinc',
     'categories': ['Cold', 'Flu', 'Fever'],
     'image': 'assets/images/medicines/neozep_z_plus_forte.png',
-    'description': 'Relief of clogged & runny nose, postnasal drip, itchy & watery eyes, sneezing, headache & & body ache, & fever associated w/ common cold, allergic rhinitis, sinusitis, flu & other minor resp tract infections. Decongest sinus openings & passages & protect resp cells against common cold & flu. Treatment & prevention of Zn mineral deficiency.',
+    'description': 'Relief of clogged & runny nose, postnasal drip, itchy & watery eyes, sneezing, headache & body ache, & fever associated w/ common cold, allergic rhinitis, sinusitis, flu & other minor resp tract infections. Decongest sinus openings & passages & protect resp cells against common cold & flu. Treatment & prevention of Zn mineral deficiency.',
     'dosage': '10 mg Phenylephrine + 2 mg Chlorphenamine + 325 mg Paracetamol + 10 mg Zinc',
     'directions of use': '1 tablet every 6 hours as needed.',
     'administration': 'May be taken with or without food.',
@@ -425,7 +438,8 @@ const List<Map<String, dynamic>> medicines = [
       'ferrous sulfate',
       'ferrous fumarate'
     ],
-    'activeIngredient': 'phenylephrine, chlorphenamine, paracetamol, zinc'
+    'activeIngredient': 'phenylephrine, chlorphenamine, paracetamol, zinc',
+    'classification': ['Decongestant', 'Antihistamine', 'Analgesic']
   },
 
   {
@@ -456,7 +470,8 @@ const List<Map<String, dynamic>> medicines = [
       'lorazepam',
       'zolpidem'
     ],
-    'activeIngredient': 'phenylpropanolamine, chlorphenamine, paracetamol'
+    'activeIngredient': 'phenylpropanolamine, chlorphenamine, paracetamol',
+    'classification': ['Decongestant', 'Analgesic']
   },
 
   {
@@ -482,7 +497,8 @@ const List<Map<String, dynamic>> medicines = [
       'ambroxol',
       'carbocisteine'
     ],
-    'activeIngredient': 'butamirate citrate'
+    'activeIngredient': 'butamirate citrate',
+    'classification': ['Antitussive']
   },
 
   {
@@ -502,7 +518,8 @@ const List<Map<String, dynamic>> medicines = [
       'butamirate citrate',
       'sinecod'
     ],
-    'activeIngredient': 'carbocisteine'
+    'activeIngredient': 'carbocisteine',
+    'classification': ['Mucolytic']
   },
 
   {
@@ -526,7 +543,8 @@ const List<Map<String, dynamic>> medicines = [
       'carbamazepine',
       'rifampicin'
     ],
-    'activeIngredient': 'paracetamol'
+    'activeIngredient': 'paracetamol',
+    'classification': ['Analgesic', 'Antipyretic']
   },
 
   {
@@ -556,6 +574,7 @@ const List<Map<String, dynamic>> medicines = [
       'lorazepam',
       'zolpidem'
     ],
-    'activeIngredient': 'dextromethorphan hydrobromide, phenylpropanolamine, paracetamol'
+    'activeIngredient': 'dextromethorphan hydrobromide, phenylpropanolamine, paracetamol',
+    'classification': ['Antitussive', 'Decongestant', 'Analgesic']
   }
 ];

@@ -37,11 +37,11 @@ class UserData {
   factory UserData.fromMap(Map<String, dynamic> map) {
     return UserData(
       id: map['id'] ?? '',
-      username: map['username'] ?? '',
-      name: map['name'] ?? '',
-      birthdate: map['birthdate'] ?? '',
-      age: map['age'] ?? 0,
-      sex: map['sex'] ?? 'Male',
+      username: map['username'] ?? map['email'] ?? '', // fallback to email if username not found
+      name: map['name'] ?? 'User',  // default name
+      birthdate: map['birthdate'] ?? DateTime.now().toString(),
+      age: map['age'] is int ? map['age'] : 0,  // ensure age is an int
+      sex: map['sex'] ?? 'Not specified',  // default sex
       height: (map['height'] ?? 0).toDouble(),
       weight: (map['weight'] ?? 0).toDouble(),
     );

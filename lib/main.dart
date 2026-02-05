@@ -54,7 +54,7 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'MedKnows',
+      title: 'OTICURE',
       theme: ThemeData(
         primarySwatch: Colors.blue,
       ),
@@ -78,10 +78,10 @@ class _MyAppState extends State<MyApp> {
                 child: Column(
                 children: [
                   Text(
-                  'MedKnows',
+                  'OTICURE',
                   style: GoogleFonts.playfairDisplaySc(
                     textStyle: const TextStyle(
-                    fontSize: 64,
+                    fontSize: 76,
                     fontWeight: FontWeight.bold,
                     color: Colors.blue,
                     height: 1,
@@ -90,10 +90,10 @@ class _MyAppState extends State<MyApp> {
                   ),
                   const SizedBox(height: 5),
                   Text(
-                  'Timely and Accurate Medication',
+                  'Over-The-Counter Medicine Recommender and Tracking Application',
                   style: GoogleFonts.openSans(
                     textStyle: const TextStyle(
-                    fontSize: 18,
+                    fontSize: 20,
                     fontWeight: FontWeight.bold,
                     fontStyle: FontStyle.italic,
                     height: 1,

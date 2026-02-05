@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:medknows/pages/medicines_screen.dart';
 import 'package:medknows/pages/home_screen.dart';  // Add this import
 import 'package:cloud_firestore/cloud_firestore.dart'; // Add this import
+import 'package:medknows/widgets/maintenance_reminder_form.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:medknows/pages/medicines.dart';  // Add this import
 import 'package:medknows/utils/medicine_safety.dart';  // Add this import
@@ -12,6 +13,7 @@ import 'package:app_settings/app_settings.dart'; // Add this import
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz;
 import 'dart:io' show Platform;
+import 'dart:typed_data';  // Add this import
 import '../utils/active_medicine_manager.dart';
 
 class ReminderScreen extends StatefulWidget {
@@ -24,32 +26,34 @@ class ReminderScreen extends StatefulWidget {
   _ReminderScreenState createState() => _ReminderScreenState();
 }
 
-class _ReminderScreenState extends State<ReminderScreen> {
+class _ReminderScreenState extends State<ReminderScreen> with WidgetsBindingObserver {
   late Timer _timer;
   Map<String, Duration> _timeRemaining = {};
-  // Change from late to nullable and initialize with empty stream
   Stream<QuerySnapshot>? _remindersStream;
   bool _initialized = false;
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+  final Map<String, DateTime> _lastNotificationTime = {};  // Add this line
+  Map<String, bool> _dismissedDialogs = {};  // Add this line
+  Map<String, bool> _activeReminders = {}; // Add this line to track active reminders
+  Map<int, Timer> _notificationTimers = {}; // Add this line near other class variables
 
-  // Add these properties
   bool _notificationsPermissionChecked = false;
   bool _notificationsEnabled = false;
+  bool _openedFromNotification = false;  // Add this line
 
   @override
   void initState() {
     super.initState();
-    _checkNotificationPermissions(); // Add this line
+    WidgetsBinding.instance.addObserver(this);  // Add this line
+    _checkNotificationPermissions();
     _initializeNotifications();
     _initializeReminders();
     _loadActiveMedicine();
   }
 
-  // Add this new method
   Future<void> _checkNotificationPermissions() async {
     if (_notificationsPermissionChecked) return;
     
-    // Fix the method name here
     final status = await flutterLocalNotificationsPlugin
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
         ?.requestNotificationsPermission();
@@ -64,7 +68,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
     }
   }
 
-  // Add this new method
   void _showNotificationPermissionDialog() {
     showDialog(
       context: context,
@@ -123,7 +126,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
                 backgroundColor: Colors.blue.withOpacity(1),
               ),
               onPressed: () async {
-                // Fix the method name here too
                 final granted = await flutterLocalNotificationsPlugin
                     .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
                     ?.requestNotificationsPermission();
@@ -131,7 +133,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
                 setState(() => _notificationsEnabled = granted ?? false);
                 Navigator.of(context).pop();
 
-                // Show result
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
@@ -144,7 +145,7 @@ class _ReminderScreenState extends State<ReminderScreen> {
                       action: granted == true ? null : SnackBarAction(
                         label: 'Settings',
                         textColor: Colors.white,
-                        onPressed: () => AppSettings.openAppSettings(), // Use AppSettings here
+                        onPressed: () => AppSettings.openAppSettings(),
                       ),
                     ),
                   );
@@ -161,7 +162,7 @@ class _ReminderScreenState extends State<ReminderScreen> {
     tz.initializeTimeZones();
     
     const AndroidInitializationSettings initializationSettingsAndroid =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
+        AndroidInitializationSettings('@mipmap/oticure');
         
     final DarwinInitializationSettings initializationSettingsIOS =
         DarwinInitializationSettings(
@@ -173,7 +174,8 @@ class _ReminderScreenState extends State<ReminderScreen> {
               'medicine_reminders',
               actions: [
                 DarwinNotificationAction.plain('TAKE_NOW', 'Take Now'),
-                DarwinNotificationAction.plain('SNOOZE', 'Snooze (15 min)'),
+                DarwinNotificationAction.plain('SNOOZE', 'Snooze'),
+                DarwinNotificationAction.plain('CLOSE', 'Close'),
               ],
               options: {
                 DarwinNotificationCategoryOption.hiddenPreviewShowTitle,
@@ -190,37 +192,55 @@ class _ReminderScreenState extends State<ReminderScreen> {
     await flutterLocalNotificationsPlugin.initialize(
       initializationSettings,
       onDidReceiveNotificationResponse: (NotificationResponse response) async {
-        // Handle notification tap
+        _openedFromNotification = true;  // Set flag when opened from notification
         if (response.payload != null) {
-          switch (response.actionId) {
-            case 'TAKE_NOW':
-              _handleMedicineTaken();
-              break;
-            case 'SNOOZE':
-              _snoozeReminder();
-              break;
-            default:
-              // Just open the app when tapped
-              break;
+          final reminderData = await _getReminderByName(response.payload!);
+          if (reminderData != null) {
+            final isMaintenance = reminderData['data']['isMaintenance'] ?? false;
+            
+            switch (response.actionId) {
+              case 'TAKE_NOW':
+                _handleMedicineTaken(reminderData['data'], reminderData['reference']);
+                break;
+              case 'SNOOZE':
+                _snoozeReminder(reminderData['data'], reminderData['reference']);
+                break;
+              case 'CLOSE':
+                if (!isMaintenance) {
+                  reminderData['reference'].delete();
+                  _addSkippedHistory(reminderData['data']);
+                }
+                break;
+              default:
+                if (_openedFromNotification) {
+                  _showActionDialog(reminderData['data'], reminderData['reference']);
+                }
+                break;
+            }
           }
         }
       },
     );
+  }
 
-    // Request permissions after initialization
-    if (Platform.isAndroid) {
-      await flutterLocalNotificationsPlugin
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-          ?.requestNotificationsPermission();
-    } else if (Platform.isIOS) {
-      await flutterLocalNotificationsPlugin
-          .resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>()
-          ?.requestPermissions(
-            alert: true,
-            badge: true,
-            sound: true,
-          );
+  Future<Map<String, dynamic>?> _getReminderByName(String medicineName) async {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('userId') ?? '';
+    
+    final querySnapshot = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .collection('reminders')
+        .where('medicine.name', isEqualTo: medicineName)
+        .get();
+
+    if (querySnapshot.docs.isNotEmpty) {
+      return {
+        'data': querySnapshot.docs.first.data(),
+        'reference': querySnapshot.docs.first.reference,
+      };
     }
+    return null;
   }
 
   Future<void> _initializeReminders() async {
@@ -231,17 +251,15 @@ class _ReminderScreenState extends State<ReminderScreen> {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('userId') ?? '';
       
-      // Initialize the stream
       _remindersStream = FirebaseFirestore.instance
           .collection('users')
           .doc(userId)
           .collection('reminders')
           .snapshots();
 
-      setState(() {}); // Trigger rebuild with initialized stream
+      setState(() {});
 
       if (widget.reminderData != null) {
-        // Check if reminder already exists
         final existingReminders = await FirebaseFirestore.instance
             .collection('users')
             .doc(userId)
@@ -257,7 +275,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
       _startTimer();
     } catch (e) {
       print('Error initializing reminders: $e');
-      // Handle initialization error
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -273,7 +290,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
     if (widget.reminderData == null) {
       final activeMedicine = await ActiveMedicineManager.getActiveMedicine();
       if (activeMedicine != null) {
-        // Update Firestore with the active medicine if not already present
         final prefs = await SharedPreferences.getInstance();
         final userId = prefs.getString('userId') ?? '';
         
@@ -307,7 +323,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
   }
 
   Future<void> _updateNextIntake(DocumentReference docRef, Map<String, dynamic> reminderData) async {
-    // Calculate next intake based on medicine directions
     final directions = reminderData['medicine']['directions of use'];
     final nextIntake = await _calculateNextIntake(directions);
     
@@ -315,7 +330,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
       'nextIntake': nextIntake.toUtc(),
     });
 
-    // Schedule notification for next intake
     await _scheduleNotification(reminderData, nextIntake);
   }
 
@@ -325,7 +339,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
   }
 
   Future<DateTime> _calculateNextIntake(String directions) async {
-    // Try to find hour interval in directions
     RegExp regExp = RegExp(r'every\s+(\d+)[-\s]*(\d+)?\s*hours?');
     Match? match = regExp.firstMatch(directions);
     
@@ -334,7 +347,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
       return DateTime.now().add(Duration(hours: minHours));
     }
     
-    // Try to find times per day
     regExp = RegExp(r'(\d+)\s*times?\s*(?:per|a)\s*day');
     match = regExp.firstMatch(directions);
     
@@ -344,8 +356,80 @@ class _ReminderScreenState extends State<ReminderScreen> {
       return DateTime.now().add(Duration(hours: hoursInterval));
     }
     
-    // Default to 6 hours if no interval found
     return DateTime.now().add(Duration(hours: 6));
+  }
+
+  DateTime _calculateNextScheduledDay(Map<String, dynamic> reminderData) {
+    final now = DateTime.now();
+    final repeatOption = reminderData['repeatOption'] as String;
+    final List<String> scheduledDays = List<String>.from(reminderData['scheduledDays']);
+    final hour = reminderData['hour'] as int;
+    final minute = reminderData['minute'] as int;
+
+    var scheduledTime = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      hour,
+      minute,
+    );
+
+    if (repeatOption == 'daily') {
+      if (scheduledTime.isBefore(now)) {
+        scheduledTime = scheduledTime.add(Duration(days: 1));
+      }
+      return scheduledTime;
+    }
+
+    String getCurrentWeekday(DateTime date) {
+      switch (date.weekday) {
+        case 1: return 'Monday';
+        case 2: return 'Tuesday';
+        case 3: return 'Wednesday';
+        case 4: return 'Thursday';
+        case 5: return 'Friday';
+        case 6: return 'Saturday';
+        case 7: return 'Sunday';
+        default: return '';
+      }
+    }
+
+    int daysToAdd = 0;
+    bool foundNext = false;
+
+    for (int i = 0; i < 7; i++) {
+      final checkDate = now.add(Duration(days: i));
+      final weekday = getCurrentWeekday(checkDate);
+
+      if (scheduledDays.contains(weekday)) {
+        if (i == 0) {
+          if (scheduledTime.isBefore(now)) {
+            continue;
+          }
+        }
+        daysToAdd = i;
+        foundNext = true;
+        break;
+      }
+    }
+
+    if (!foundNext) {
+      for (int i = 0; i < 7; i++) {
+        final weekday = getCurrentWeekday(now.add(Duration(days: i)));
+        if (scheduledDays.contains(weekday)) {
+          daysToAdd = i + 7;
+          break;
+        }
+      }
+    }
+
+    return DateTime(
+      now.year,
+      now.month,
+      now.day + daysToAdd,
+      hour,
+      minute,
+    );
   }
 
   void _startTimer() {
@@ -366,13 +450,32 @@ class _ReminderScreenState extends State<ReminderScreen> {
                 final nextIntake = (data['nextIntake'] as Timestamp).toDate();
                 final remaining = nextIntake.difference(DateTime.now());
                 
-                _timeRemaining[doc.id] = remaining;
+                // Only update time remaining if reminder is not active
+                if (!(_activeReminders[doc.id] == true)) {
+                  _timeRemaining[doc.id] = remaining;
+                }
                 
-                // Check if it's time for notification
                 if (remaining.isNegative) {
-                  _showNotification(data);
-                  // Update next intake time
-                  _updateNextIntake(doc.reference, data);
+                  final lastShown = _lastNotificationTime[doc.id];
+                  final now = DateTime.now();
+                  if ((lastShown == null || now.difference(lastShown) > Duration(minutes: 1)) 
+                      && !(_activeReminders[doc.id] == true)) {
+                    _lastNotificationTime[doc.id] = now;
+                    _activeReminders[doc.id] = true; // Mark reminder as active
+                    _showSystemNotification(data);
+                    if (mounted && !_openedFromNotification) {
+                      _showActionDialog(data, doc.reference);
+                    }
+                  }
+                  
+                  if (data['isMaintenance'] == true && !(_activeReminders[doc.id] == true)) {
+                    final nextScheduledTime = _calculateNextScheduledDay(data);
+                    doc.reference.update({
+                      'nextIntake': nextScheduledTime.toUtc(),
+                      'lastNotificationTime': Timestamp.now(),
+                    });
+                    _scheduleNotification(data, nextScheduledTime);
+                  }
                 }
               }
             }
@@ -382,19 +485,19 @@ class _ReminderScreenState extends State<ReminderScreen> {
     });
   }
 
-  void _showNotification(Map<String, dynamic> reminderData) {
-    // Show system notification first
-    _showSystemNotification(reminderData);
-    
-    // Then show in-app dialog with three buttons
-    if (mounted) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => AlertDialog(
+  void _showActionDialog(Map<String, dynamic> reminderData, DocumentReference reference) {
+    final docId = reference.id;
+    if (_dismissedDialogs[docId] == true) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => WillPopScope( // Add WillPopScope to prevent back button
+        onWillPop: () async => false,
+        child: AlertDialog(
           title: Row(
             children: [
-              Icon(Icons.notifications_active, color: Colors.blue.withOpacity(1)),
+              Icon(Icons.notifications_active, color: Colors.blue),
               SizedBox(width: 8),
               Text('Medicine Reminder'),
             ],
@@ -409,24 +512,35 @@ class _ReminderScreenState extends State<ReminderScreen> {
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
               ),
               Text(
-                '${reminderData['tablets']} tablet(s) - ${reminderData['dosage']} mg',
+                reminderData['isMaintenance'] == true
+                    ? '${reminderData['tabletCount']} tablet(s)'
+                    : '${reminderData['tablets']} tablet(s) - ${reminderData['dosage']} mg',
                 style: TextStyle(color: Colors.grey[600]),
               ),
             ],
           ),
           actions: [
-            TextButton(
-              child: Text('Close'),
-              onPressed: () {
-                Navigator.pop(context);
-                _handleCloseReminder();
-              },
-            ),
+            if (reminderData['isMaintenance'] != true)
+              TextButton(
+                child: Text('Close'),
+                onPressed: () {
+                  Navigator.pop(context);
+                  _dismissedDialogs[docId] = true;
+                  _activeReminders[docId] = false; // Reset active state
+                  reference.delete();
+                  _addSkippedHistory({...reminderData, 'id': docId});
+                },
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.red,
+                ),
+              ),
             TextButton(
               child: Text('Snooze (15 min)'),
               onPressed: () {
                 Navigator.pop(context);
-                _snoozeReminder();
+                _dismissedDialogs[docId] = true;
+                _activeReminders[docId] = false; // Reset active state
+                _snoozeReminder(reminderData, reference);
               },
               style: TextButton.styleFrom(
                 foregroundColor: Colors.orange,
@@ -436,7 +550,9 @@ class _ReminderScreenState extends State<ReminderScreen> {
               child: Text('Take Now'),
               onPressed: () {
                 Navigator.pop(context);
-                _handleMedicineTaken();
+                _dismissedDialogs[docId] = true;
+                _activeReminders[docId] = false; // Reset active state
+                _handleMedicineTaken(reminderData, reference);
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: Color.fromRGBO(66, 96, 208, 1),
@@ -444,104 +560,80 @@ class _ReminderScreenState extends State<ReminderScreen> {
             ),
           ],
         ),
-      );
-    }
+      ),
+    );
   }
 
-  // Add this new method
-  void _handleCloseReminder() async {
+  Future<void> _addSkippedHistory(Map<String, dynamic> reminderData) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('userId') ?? '';
+      final docId = reminderData['id'] ?? '';  // Get document ID
+      _dismissedDialogs[docId] = true;  // Mark dialog as dismissed
+      final notificationId = reminderData['medicine']['name'].hashCode;
+      await flutterLocalNotificationsPlugin.cancel(notificationId);
 
-      // Find and delete the reminder
-      final querySnapshot = await FirebaseFirestore.instance
+      final historyEntry = {
+        'medicine': reminderData['medicine'],
+        'tablets': reminderData['tablets'],
+        'dosage': reminderData['dosage'],
+        'takenAt': Timestamp.fromDate(DateTime.now()),
+        'status': 'skipped',
+        'userId': await _getUserId(),
+        'date': Timestamp.fromDate(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)),
+      };
+
+      await FirebaseFirestore.instance
           .collection('users')
-          .doc(userId)
-          .collection('reminders')
-          .where('medicine.name', isEqualTo: widget.reminderData!['medicine']['name'])
-          .get();
-
-      if (querySnapshot.docs.isNotEmpty) {
-        // Delete the reminder
-        await querySnapshot.docs.first.reference.delete();
-
-        // Cancel any scheduled notifications
-        await flutterLocalNotificationsPlugin.cancel(
-          widget.reminderData!['medicine']['name'].hashCode
+          .doc(await _getUserId())
+          .collection('history')
+          .add(historyEntry);
+          
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).popUntil((route) => route.isFirst);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Reminder removed'), backgroundColor: Colors.orange),
         );
-
-        // Add completed record to history
-        final historyEntry = {
-          'medicine': widget.reminderData!['medicine'],
-          'tablets': widget.reminderData!['tablets'],
-          'dosage': widget.reminderData!['dosage'],
-          'takenAt': Timestamp.fromDate(DateTime.now()),
-          'status': 'completed',
-          'userId': userId,
-          'date': Timestamp.fromDate(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)),
-        };
-
-        await FirebaseFirestore.instance
-            .collection('users')
-            .doc(userId)
-            .collection('history')
-            .add(historyEntry);
-
-        // Clear from active medicines if present
-        await ActiveMedicineManager.clearActiveMedicine();
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Reminder ended successfully'),
-              duration: Duration(seconds: 2),
-              backgroundColor: Colors.green,
-            ),
-          );
-
-          // Navigate back to home screen
-          Navigator.pushAndRemoveUntil(
-            context,
-            MaterialPageRoute(
-              builder: (context) => HomeScreen(
-                userName: '',
-                initialIndex: 2, // History tab
-              ),
-            ),
-            (route) => false,
-          );
-        }
       }
     } catch (e) {
-      print('Error in _handleCloseReminder: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error ending reminder'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      print('Error adding skipped history: $e');
     }
   }
 
   Future<void> _showSystemNotification(Map<String, dynamic> reminderData) async {
     try {
-      AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-        'medicine_reminders_immediate', // different channel id for immediate notifications
+      final id = reminderData['medicine']['name'].hashCode;
+      final vibrationPattern = Int64List.fromList([0, 1000, 500, 1000, 500, 1000]);
+      
+      final androidChannel = AndroidNotificationChannel(
+        'medicine_reminders_high_importance',
         'Medicine Reminders',
-        channelDescription: 'Immediate notifications for medicine reminders',
+        description: 'Important notifications for medicine reminders',
+        importance: Importance.max,
+        enableVibration: true,
+        playSound: true,
+        showBadge: true,
+        vibrationPattern: vibrationPattern,
+      );
+
+      await flutterLocalNotificationsPlugin
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+          ?.createNotificationChannel(androidChannel);
+
+      AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+        androidChannel.id,
+        androidChannel.name,
+        channelDescription: androidChannel.description,
         importance: Importance.max,
         priority: Priority.high,
         showWhen: true,
         enableVibration: true,
         playSound: true,
+        ongoing: true, // Make notification persistent
+        autoCancel: false, // Prevent auto-cancellation
+        vibrationPattern: vibrationPattern,
+        icon: '@mipmap/oticure',
         fullScreenIntent: true,
-        styleInformation: BigTextStyleInformation(
-          'It\'s time to take your medicine: ${reminderData['medicine']['name']}\n'
-          'Dosage: ${reminderData['tablets']} tablet(s) - ${reminderData['dosage']} mg',
-        ),
+        category: AndroidNotificationCategory.alarm,
+        visibility: NotificationVisibility.public,
       );
 
       NotificationDetails platformDetails = NotificationDetails(
@@ -550,69 +642,179 @@ class _ReminderScreenState extends State<ReminderScreen> {
           presentAlert: true,
           presentBadge: true,
           presentSound: true,
-          subtitle: '${reminderData['tablets']} tablet(s) - ${reminderData['dosage']} mg',
+          sound: 'notification_sound.wav',
+          interruptionLevel: InterruptionLevel.timeSensitive,
         ),
       );
 
       await flutterLocalNotificationsPlugin.show(
-        reminderData['medicine']['name'].hashCode,
+        id,
         'Medicine Reminder',
         'Time to take ${reminderData['medicine']['name']}',
         platformDetails,
         payload: reminderData['medicine']['name'],
       );
+
+      // Cancel any existing timer for this notification
+      _notificationTimers[id]?.cancel();
+      
+      // Create new periodic timer
+      _notificationTimers[id] = Timer.periodic(Duration(seconds: 2), (timer) {
+        if (!(_activeReminders[reminderData['medicine']['name'].hashCode] == true)) {
+          flutterLocalNotificationsPlugin.show(
+            id,
+            'Medicine Reminder',
+            'Time to take ${reminderData['medicine']['name']}',
+            platformDetails,
+            payload: reminderData['medicine']['name'],
+          );
+        } else {
+          timer.cancel();
+          _notificationTimers.remove(id);
+        }
+      });
+
     } catch (e) {
       print('Error showing system notification: $e');
     }
   }
 
-  Future<void> _snoozeReminder() async {
+  Future<void> _handleMedicineTaken(Map<String, dynamic> reminderData, DocumentReference reference) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('userId') ?? '';
+      final docId = reference.id;
+      final notificationId = reminderData['medicine']['name'].hashCode;
+      
+      // Cancel notification timer
+      _notificationTimers[notificationId]?.cancel();
+      _notificationTimers.remove(notificationId);
+      
+      // Cancel the notification
+      await flutterLocalNotificationsPlugin.cancel(notificationId);
+      
+      _dismissedDialogs[docId] = true;  // Mark dialog as dismissed
+      _activeReminders[docId] = false; // Reset active state
+
+      final isMaintenance = reminderData['isMaintenance'] ?? false;
+      
+      if (isMaintenance) {
+        final quantity = reminderData['quantity'] ?? 0;
+        final tabletCount = reminderData['tabletCount'] ?? 1;
+        
+        if (quantity - tabletCount < 0) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Not enough tablets remaining'), backgroundColor: Colors.red),
+            );
+          }
+          return;
+        }
+
+        await reference.update({
+          'quantity': quantity - tabletCount,
+          'nextIntake': _calculateNextScheduledDay(reminderData).toUtc(),
+        });
+
+      } else {
+        await reference.delete();
+      }
+
+      final historyEntry = {
+        'medicine': reminderData['medicine'],
+        'tablets': isMaintenance ? reminderData['tabletCount'] : reminderData['tablets'],
+        'dosage': reminderData['dosage'],
+        'takenAt': Timestamp.fromDate(DateTime.now()),
+        'status': 'taken',
+        'userId': await _getUserId(),
+        'date': Timestamp.fromDate(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)),
+      };
+
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(await _getUserId())
+          .collection('history')
+          .add(historyEntry);
+
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).popUntil((route) => route.isFirst);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Medicine taken successfully'), backgroundColor: Colors.green),
+        );
+      }
+
+    } catch (e) {
+      print('Error handling medicine taken: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error handling reminder'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  Future<void> _snoozeReminder(Map<String, dynamic> reminderData, DocumentReference reference) async {
+    try {
+      final docId = reference.id;
+      final notificationId = reminderData['medicine']['name'].hashCode;
+      
+      // Cancel notification timer
+      _notificationTimers[notificationId]?.cancel();
+      _notificationTimers.remove(notificationId);
+      
+      // Cancel the notification
+      await flutterLocalNotificationsPlugin.cancel(notificationId);
+
+      _dismissedDialogs[docId] = true;
+      _activeReminders[docId] = false;
 
       final newNextIntake = DateTime.now().add(Duration(minutes: 15));
+      final isMaintenance = reminderData['isMaintenance'] ?? false;
       
-      // Update the reminder in Firestore
-      final querySnapshot = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(userId)
-          .collection('reminders')
-          .where('medicine.name', isEqualTo: widget.reminderData!['medicine']['name'])
-          .get();
+      if (isMaintenance) {
+        // For maintenance medicine, just update the nextIntake
+        await reference.update({
+          'nextIntake': newNextIntake.toUtc(),
+          'snoozedFrom': reminderData['nextIntake'],
+          'lastSnoozedAt': Timestamp.now(),
+        });
 
-      if (querySnapshot.docs.isNotEmpty) {
-        await querySnapshot.docs.first.reference.update({
+        // Schedule the next notification
+        await _scheduleNotification(
+          reminderData,
+          newNextIntake,
+        );
+      } else {
+        // For regular medicine
+        await reference.update({
           'nextIntake': newNextIntake.toUtc(),
         });
 
-        // Add snooze record to history
+        // Only add to history for non-maintenance medicines
         final historyEntry = {
-          'medicine': widget.reminderData!['medicine'],
-          'tablets': widget.reminderData!['tablets'],
-          'dosage': widget.reminderData!['dosage'],
+          'medicine': reminderData['medicine'],
+          'tablets': reminderData['tablets'],
+          'dosage': reminderData['dosage'],
           'takenAt': Timestamp.fromDate(DateTime.now()),
           'status': 'snoozed',
           'nextNotification': Timestamp.fromDate(newNextIntake),
-          'userId': userId,
+          'userId': await _getUserId(),
           'date': Timestamp.fromDate(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)),
         };
 
         await FirebaseFirestore.instance
             .collection('users')
-            .doc(userId)
+            .doc(await _getUserId())
             .collection('history')
             .add(historyEntry);
 
-        // Schedule next notification
-        await _scheduleNotification(widget.reminderData!, newNextIntake);
+        await _scheduleNotification(reminderData, newNextIntake);
       }
 
       if (mounted) {
+        Navigator.of(context, rootNavigator: true).popUntil((route) => route.isFirst);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Reminder snoozed for 15 minutes'),
-            duration: Duration(seconds: 2),
+            backgroundColor: Colors.orange, // Changed from blue to orange for consistency
           ),
         );
       }
@@ -622,7 +824,7 @@ class _ReminderScreenState extends State<ReminderScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Error snoozing reminder'),
+            content: Text('Error snoozing reminder: ${e.toString()}'),
             backgroundColor: Colors.red,
           ),
         );
@@ -630,497 +832,527 @@ class _ReminderScreenState extends State<ReminderScreen> {
     }
   }
 
-  Future<double> _getTotalDosageIn24Hours(String medicineName) async {
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('userId') ?? 'id';
-    
-    final now = DateTime.now();
-    final yesterday = now.subtract(Duration(hours: 24));
-    
-    final querySnapshot = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(userId)
-        .collection('history')
-        .where('medicine.name', isEqualTo: medicineName)
-        .where('takenAt', isGreaterThanOrEqualTo: yesterday)
-        .where('takenAt', isLessThanOrEqualTo: now)
-        .get();
-
-    double totalDosage = 0;
-    for (var doc in querySnapshot.docs) {
-      totalDosage += (doc.data()['dosage'] as num).toDouble();
-    }
-    
-    return totalDosage;
-  }
-
-  Future<bool> _checkDosageSafety(double newDosage, String medicineName) async {
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('userId') ?? 'id';
-    
-    // Get total active ingredients taken in last 24 hours
-    final currentTotals = await MedicineSafety.getTotalActiveIngredientsIn24Hours(userId);
-    
-    // Check if new dosage would exceed limits for any active ingredient
-    final warnings = await MedicineSafety.checkTotalActiveDosage(
-      widget.reminderData!['medicine'],
-      newDosage,
-      currentTotals,
-      medicines
-    );
-
-    if (warnings.isNotEmpty) {
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text('Safety Warning'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              ...warnings.map((warning) => Padding(
-                padding: EdgeInsets.only(bottom: 8),
-                child: Text(warning),
-              )),
-            ],
-          ),
-          actions: [
-            TextButton(
-              child: Text('OK'),
-              onPressed: () => Navigator.pop(context),
-            ),
-          ],
-        ),
-      );
-      return false;
-    }
-    return true;
-  }
-
-  Future<bool> _checkMedicineSafety(String medicineName) async {
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('userId') ?? 'id';
-    
-    // Get recently taken medicines
-    final recentMedicines = await MedicineSafety.getRecentlyTakenMedicines(userId);
-    
-    // Check for interactions
-    final warnings = MedicineSafety.checkInteractions(
-      widget.reminderData!['medicine'],
-      recentMedicines,
-      medicines
-    );
-    
-    if (warnings.isNotEmpty) {
-      final result = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text('Medicine Interaction Warning'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('The following interactions were detected:'),
-              SizedBox(height: 8),
-              ...warnings.map((w) => Padding(
-                padding: EdgeInsets.only(bottom: 4),
-                child: Text('• $w', style: TextStyle(color: Colors.red)),
-              )),
-              SizedBox(height: 8),
-              Text('Do you still want to take this medicine?'),
-            ],
-          ),
-          actions: [
-            TextButton(
-              child: Text('Cancel'),
-              onPressed: () => Navigator.of(context).pop(false),
-            ),
-            TextButton(
-              child: Text('Take Anyway', style: TextStyle(color: Colors.red)),
-              onPressed: () => Navigator.of(context).pop(true),
-            ),
-          ],
-        ),
-      );
-      return result ?? false;
-    }
-    return true;
-  }
-
-  Future<void> _addToHistory({bool isInitialDose = false}) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('userId') ?? '';
-      
-      final now = DateTime.now();
-      final historyEntry = {
-        'medicine': widget.reminderData!['medicine'],
-        'tablets': widget.reminderData!['tablets'],
-        'dosage': widget.reminderData!['dosage'],
-        'takenAt': Timestamp.fromDate(now),  // Change to Timestamp
-        'status': 'taken',
-        'maxDailyDose': _extractMaxDailyDose(widget.reminderData!['medicine']['directions of use']),
-        'userId': userId,
-        'date': Timestamp.fromDate(DateTime(now.year, now.month, now.day)),  // Change to Timestamp
-        'isOneTime': widget.reminderData!['isOneTime'] ?? false,
-      };
-
-      // Get history collection reference
-      final historyRef = FirebaseFirestore.instance
-          .collection('users')
-          .doc(userId)
-          .collection('history');
-
-      // Add entry and verify
-      final docRef = await historyRef.add(historyEntry);
-      print('Adding history entry: ${historyEntry}');
-      
-      // Verify the document was created
-      final docSnapshot = await docRef.get();
-      if (!docSnapshot.exists) {
-        throw Exception('Failed to create history entry');
-      }
-
-      print('Successfully created history entry with ID: ${docRef.id}');
-      
-      // Return early for one-time medicines
-      if (widget.reminderData!['isOneTime'] == true) {
-        return;
-      }
-
-      // Add next scheduled intake for recurring medicines
-      final nextIntake = await _calculateNextIntake(widget.reminderData!['medicine']['directions of use']);
-      final scheduledEntry = {
-        ...historyEntry,
-        'status': 'scheduled',
-        'scheduledFor': Timestamp.fromDate(nextIntake),
-      };
-
-      final scheduledRef = await historyRef.add(scheduledEntry);
-      print('Added scheduled entry with ID: ${scheduledRef.id}');
-
-    } catch (e) {
-      print('Error in _addToHistory: $e');
-      throw e;
-    }
-  }
-
-  int _extractMaxDailyDose(String directions) {
-    // Try to find explicit maximum daily dose
-    RegExp maxDoseRegex = RegExp(r'maximum.+?(\d+)\s*mg|max[.\s]+(\d+)\s*mg|exceed\s+(\d+)\s*mg');
-    Match? maxMatch = maxDoseRegex.firstMatch(directions);
-    if (maxMatch != null) {
-      String? value = maxMatch.group(1) ?? maxMatch.group(2) ?? maxMatch.group(3);
-      return int.parse(value!);
-    }
-
-    // Try to find tablets per day
-    RegExp tabletRegex = RegExp(r'(\d+)[-\s]*(\d+)?\s*tablets?');
-    Match? tabletMatch = tabletRegex.firstMatch(directions);
-    
-    RegExp timesRegex = RegExp(r'(\d+)\s*times?\s*(?:per|a)\s*day');
-    Match? timesMatch = timesRegex.firstMatch(directions);
-    
-    if (tabletMatch != null && timesMatch != null) {
-      int maxTablets = int.parse(tabletMatch.group(2) ?? tabletMatch.group(1)!);
-      int timesPerDay = int.parse(timesMatch.group(1)!);
-      int dosagePerTablet = int.parse(widget.reminderData!['dosage'].toString());
-      return maxTablets * timesPerDay * dosagePerTablet;
-    }
-
-    // Default based on common dosing
-    return int.parse(widget.reminderData!['dosage'].toString()) * 4; // Assume 4 doses per day max
-  }
-
-  void _handleMedicineTaken() async {
-    try {
-      final medicineName = widget.reminderData!['medicine']['name'];
-      final newDosage = double.parse(widget.reminderData!['dosage'].toString());
-      
-      // Safety checks first
-      final totalDosage = await _getTotalDosageIn24Hours(medicineName);
-      final maxDailyDose = _extractMaxDailyDose(widget.reminderData!['medicine']['directions of use']);
-      
-      if (totalDosage + newDosage > maxDailyDose) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Warning: Maximum daily dose would be exceeded'),
-            backgroundColor: Colors.orange,
-          ),
-        );
-        return;
-      }
-
-      // Add current intake to history
-      print('Adding current intake to history...');
-      await _addToHistory(isInitialDose: false);
-
-      // Calculate and schedule next intake
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('userId') ?? '';
-      
-      if (!widget.reminderData!['isOneTime']) {
-        // Cancel existing notification
-        await flutterLocalNotificationsPlugin.cancel(
-          widget.reminderData!['medicine']['name'].hashCode
-        );
-        
-        final directions = widget.reminderData!['medicine']['directions of use'];
-        final nextIntake = await _calculateNextIntake(directions);
-        
-        // Schedule next notification
-        await _scheduleNotification(widget.reminderData!, nextIntake);
-        
-        // Update the reminder with next intake time
-        final querySnapshot = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(userId)
-            .collection('reminders')
-            .where('medicine.name', isEqualTo: medicineName)
-            .get();
-
-        if (querySnapshot.docs.isNotEmpty) {
-          await querySnapshot.docs.first.reference.update({
-            'nextIntake': nextIntake.toUtc(),
-          });
-
-          // Add next scheduled intake to history
-          final scheduledEntry = {
-            'medicine': widget.reminderData!['medicine'],
-            'tablets': widget.reminderData!['tablets'],
-            'dosage': widget.reminderData!['dosage'],
-            'status': 'scheduled',
-            'scheduledFor': Timestamp.fromDate(nextIntake),
-            'userId': userId,
-            'date': Timestamp.fromDate(DateTime(nextIntake.year, nextIntake.month, nextIntake.day)),
-          };
-
-          await FirebaseFirestore.instance
-              .collection('users')
-              .doc(userId)
-              .collection('history')
-              .add(scheduledEntry);
-        }
-      } else {
-        // Delete one-time reminder after taking
-        final querySnapshot = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(userId)
-            .collection('reminders')
-            .where('medicine.name', isEqualTo: medicineName)
-            .get();
-
-        if (querySnapshot.docs.isNotEmpty) {
-          await querySnapshot.docs.first.reference.delete();
-        }
-      }
-
-      if (!mounted) return;
-
-      // Show success message
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Medicine taken successfully'),
-          backgroundColor: Colors.green,
-          duration: Duration(seconds: 2),
-        ),
-      );
-
-      // Verify history entry was created
-      final historyVerification = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(userId)
-          .collection('history')
-          .where('medicine.name', isEqualTo: medicineName)
-          .where('takenAt', isGreaterThan: Timestamp.fromDate(DateTime.now().subtract(Duration(minutes: 5))))
-          .get();
-
-      print('Found ${historyVerification.docs.length} recent history entries');
-
-      // Navigate to history screen
-      await Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(
-          builder: (context) => HomeScreen(
-            userName: '',
-            initialIndex: 2, // History tab
-          ),
-        ),
-        (route) => false,
-      );
-
-    } catch (e) {
-      print('Error in _handleMedicineTaken: $e');
-      if (!mounted) return;
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error taking medicine: ${e.toString()}'),
-          backgroundColor: Colors.red,
-          duration: Duration(seconds: 4),
-        ),
-      );
-    }
-  }
-
   Future<void> _scheduleNotification(Map<String, dynamic> reminderData, DateTime nextIntake) async {
-    final id = reminderData['medicine']['name'].hashCode;
-    
-    AndroidNotificationDetails androidPlatformChannelSpecifics =
-        AndroidNotificationDetails(
-      'medicine_reminders',
-      'Medicine Reminders',
-      channelDescription: 'Notifications for medicine reminders',
-      importance: Importance.max,
-      priority: Priority.high,
-      ongoing: true,
-      autoCancel: false,
-      showWhen: true,
-    );
+    try {
+      final id = reminderData['medicine']['name'].hashCode;
+      
+      if (reminderData['isMaintenance'] == true) {
+        final hour = reminderData['hour'] as int?;
+        final minute = reminderData['minute'] as int?;
+        
+        if (hour != null && minute != null) {
+          var scheduledTime = DateTime(
+            nextIntake.year,
+            nextIntake.month,
+            nextIntake.day,
+            hour,
+            minute,
+          );
+          
+          if (scheduledTime.isBefore(DateTime.now())) {
+            scheduledTime = scheduledTime.add(Duration(days: 1));
+          }
 
-    DarwinNotificationDetails iOSPlatformChannelSpecifics =
-        DarwinNotificationDetails(
-          presentAlert: true,
-          presentBadge: true,
-          presentSound: true,
-        );
+          nextIntake = scheduledTime;
+        }
+      }
 
-    NotificationDetails platformChannelSpecifics = NotificationDetails(
-      android: androidPlatformChannelSpecifics,
-      iOS: iOSPlatformChannelSpecifics,
-    );
+      AndroidNotificationDetails androidPlatformChannelSpecifics =
+          AndroidNotificationDetails(
+        'medicine_reminders',
+        'Medicine Reminders',
+        channelDescription: 'Notifications for medicine reminders',
+        importance: Importance.max,
+        priority: Priority.high,
+        ongoing: true,
+        autoCancel: false,
+        showWhen: true,
+      );
 
-    await flutterLocalNotificationsPlugin.zonedSchedule(
-      id,
-      'Medicine Reminder',
-      'Time to take ${reminderData['medicine']['name']}',
-      tz.TZDateTime.from(nextIntake, tz.local),
-      platformChannelSpecifics,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.time,
-      payload: reminderData['medicine']['name'],
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle, // Add this line
-    );
+      DarwinNotificationDetails iOSPlatformChannelSpecifics =
+          DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          );
+
+      NotificationDetails platformChannelSpecifics = NotificationDetails(
+        android: androidPlatformChannelSpecifics,
+        iOS: iOSPlatformChannelSpecifics,
+      );
+
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        id,
+        'Medicine Reminder',
+        'Time to take ${reminderData['medicine']['name']}',
+        tz.TZDateTime.from(nextIntake, tz.local),
+        platformChannelSpecifics,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.time,
+        payload: reminderData['medicine']['name'],
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      );
+    } catch (e) {
+      print('Error scheduling notification: $e');
+    }
   }
 
   void _handleAddMedicine() async {
     try {
       final activeMedicine = await ActiveMedicineManager.getActiveMedicine();
+      
+      final result = await showDialog<String>(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text(
+              'Add Reminder',
+              style: TextStyle(
+                color: Colors.blue[700],
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  tileColor: Colors.blue[50],
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  leading: Icon(Icons.healing, color: Colors.blue[700]),
+                  title: Text(
+                    'Health Assessment',
+                    style: TextStyle(color: Colors.blue[700]),
+                  ),
+                  subtitle: Text(
+                    'Get medicine recommendations based on symptoms',
+                    style: TextStyle(color: Colors.blue[500]),
+                  ),
+                  onTap: () => Navigator.pop(context, 'health'),
+                ),
+                SizedBox(height: 8),
+                ListTile(
+                  tileColor: Colors.blue[50],
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  leading: Icon(Icons.calendar_today, color: Colors.blue[700]),
+                  title: Text(
+                    'Maintenance Medicine',
+                    style: TextStyle(color: Colors.blue[700]),
+                  ),
+                  subtitle: Text(
+                    'Set reminder for regular medication',
+                    style: TextStyle(color: Colors.blue[500]),
+                  ),
+                  onTap: () => Navigator.pop(context, 'maintenance'),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+
+      if (result == null) return;
+
+      if (result == 'maintenance') {
+        _showMaintenanceForm();
+        return;
+      }
+
       if (activeMedicine != null && mounted) {
-        final shouldContinue = await showDialog<bool>(
+      } else {
+        if (!mounted) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => MedicinesScreen(
+              showBackButton: true,
+              reminderData: null,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      print('Error handling add medicine: $e');
+    }
+  }
+
+  void _showMaintenanceForm() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: MaintenanceReminderForm(
+          onComplete: _handleMaintenanceSubmit,
+        ),
+      ),
+    );
+  }
+
+  void _handleMaintenanceSubmit(Map<String, dynamic> data) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('userId') ?? '';
+
+      String timeStr = data['time'] as String;
+      List<String> parts = timeStr.split(' ');
+      List<String> timeParts = parts[0].split(':');
+      int hour = int.parse(timeParts[0]);
+      int minute = int.parse(timeParts[1]);
+      
+      if (parts[1] == 'PM' && hour < 12) {
+        hour += 12;
+      } else if (parts[1] == 'AM' && hour == 12) {
+        hour = 0;
+      }
+
+      var scheduledTime = DateTime(
+        DateTime.now().year,
+        DateTime.now().month,
+        DateTime.now().day,
+        hour,
+        minute,
+      );
+      
+      if (scheduledTime.isBefore(DateTime.now())) {
+        scheduledTime = scheduledTime.add(Duration(days: 1));
+      }
+
+      final updatedData = {
+        ...data,
+        'hour': hour,
+        'minute': minute,
+      };
+
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .collection('reminders')
+          .add({
+        ...updatedData,
+        'createdAt': FieldValue.serverTimestamp(),
+        'nextIntake': scheduledTime.toUtc(),
+      });
+
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Reminder set for ${scheduledTime.hour}:${scheduledTime.minute.toString().padLeft(2, '0')}${scheduledTime.day != DateTime.now().day ? ' tomorrow' : ' today'}'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('Error setting maintenance reminder: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error setting reminder'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _buildReminderCard(
+    Map<String, dynamic> reminderData,
+    DocumentReference reference,
+    Duration timeRemaining
+  ) {
+    final bool isMaintenance = reminderData['isMaintenance'] ?? false;
+    final int quantity = reminderData['quantity'] ?? 0;
+    final int tabletCount = reminderData['tabletCount'] ?? 1;
+    final int lowStockThreshold = reminderData['lowStockThreshold'] ?? 10;
+
+    if (isMaintenance && quantity <= 0) {
+      reference.delete();
+      return SizedBox.shrink();
+    }
+
+    return Dismissible(
+      key: Key(reference.id),
+      direction: DismissDirection.endToStart,
+      onDismissed: (direction) {
+        reference.delete();
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Reminder deleted'),
+            action: SnackBarAction(
+              label: 'Undo',
+              onPressed: () async {
+                await reference.set(reminderData);
+              },
+            ),
+          ),
+        );
+      },
+      confirmDismiss: (direction) async {
+        return await showDialog(
           context: context,
-          barrierDismissible: false,
           builder: (BuildContext context) {
             return AlertDialog(
-              title: Row(
-                children: [
-                  Icon(Icons.warning_amber, color: Colors.amber),
-                  SizedBox(width: 8),
-                  Text('Active Medicine Warning'),
-                ],
-              ),
-              backgroundColor: Colors.amber[50],
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'You currently have an active medicine:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  SizedBox(height: 8),
-                  Container(
-                    padding: EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        Image.asset(
-                          activeMedicine['medicine']['image'],
-                          width: 40,
-                          height: 40,
-                        ),
-                        SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                activeMedicine['medicine']['name'],
-                                style: TextStyle(fontWeight: FontWeight.bold),
-                              ),
-                              Text(
-                                activeMedicine['medicine']['genericName'],
-                                style: TextStyle(fontStyle: FontStyle.italic),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  SizedBox(height: 12),
-                  Text(
-                    'Adding another medicine might cause drug interactions.',
-                    style: TextStyle(color: Colors.orange[900]),
-                  ),
-                ],
-              ),
+              title: Text('Confirm Delete'),
+              content: Text('Are you sure you want to delete this reminder?'),
               actions: [
                 TextButton(
                   child: Text('Cancel'),
                   onPressed: () => Navigator.of(context).pop(false),
                 ),
                 TextButton(
-                  child: Text(
-                    'Continue Anyway',
-                    style: TextStyle(color: Colors.orange[900]),
-                  ),
+                  child: Text('Delete', style: TextStyle(color: Colors.red)),
                   onPressed: () => Navigator.of(context).pop(true),
                 ),
               ],
             );
           },
         );
-
-        if (shouldContinue == true) {
-          if (!mounted) return;
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => MedicinesScreen(
-                showBackButton: true,
-                reminderData: activeMedicine,
+      },
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: EdgeInsets.symmetric(horizontal: 20),
+        color: Colors.red,
+        child: Icon(
+          Icons.delete,
+          color: Colors.white,
+        ),
+      ),
+      child: Card(
+        margin: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        elevation: 2,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Container(
+          padding: EdgeInsets.all(12),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  if (reminderData['medicine']['isMaintenanceIcon'] == true)
+                    Container(
+                      width: 50,
+                      height: 50,
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(25),
+                      ),
+                      child: Icon(
+                        Icons.medication_rounded,
+                        color: Colors.blue,
+                        size: 30,
+                      ),
+                    )
+                  else
+                    Image.asset(
+                      reminderData['medicine']['image'],
+                      width: 50,
+                      height: 50,
+                    ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          reminderData['medicine']['name'],
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Text(
+                          reminderData['medicine']['genericName'],
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontStyle: FontStyle.italic,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                        Text(
+                          (reminderData['medicine']['classification'] as List<dynamic>).join(', '),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.blue[600],
+                          ),
+                        ),
+                        if (isMaintenance) ...[
+                          Text(
+                            'Stock: $quantity tablets',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: quantity <= lowStockThreshold 
+                                ? Colors.red 
+                                : Colors.grey[800],
+                            ),
+                          ),
+                          if (quantity <= lowStockThreshold)
+                            Text(
+                              'Low stock! Please refill soon.',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.red,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                        ] else
+                          Text(
+                            '${reminderData['tablets']} tablet/s',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.grey[800],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    child: Column(
+                      children: [
+                        Text(
+                          '${timeRemaining.inHours}:${timeRemaining.inMinutes.remainder(60).toString().padLeft(2, '0')}:${timeRemaining.inSeconds.remainder(60).toString().padLeft(2, '0')}',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.grey[800],
+                          ),
+                        ),
+                        if (timeRemaining.isNegative)
+                          ElevatedButton(
+                            onPressed: () => _handleMedicineTaken(reminderData, reference),
+                            child: Text('Take'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.blue.withOpacity(1),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
+              if (isMaintenance)
+                Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Column(
+                    children: [
+                      Text(
+                        'Daily at ${reminderData['time']}',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Colors.blue,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      if (reminderData['repeatOption'] == 'custom')
+                        Text(
+                          'On: ${(reminderData['scheduledDays'] as List).join(', ')}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                      if (quantity <= lowStockThreshold)
+                        Padding(
+                          padding: EdgeInsets.only(top: 4),
+                          child: Text(
+                            '$quantity tablets remaining',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.red,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleCloseReminder() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('userId') ?? '';
+
+      final querySnapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .collection('reminders')
+          .where('medicine.name', isEqualTo: widget.reminderData!['medicine']['name'])
+          .get();
+
+      if (querySnapshot.docs.isNotEmpty) {
+        final reminderData = querySnapshot.docs.first.data();
+        
+        final historyEntry = {
+          'medicine': reminderData['medicine'],
+          'tablets': reminderData['tablets'],
+          'dosage': reminderData['dosage'],
+          'takenAt': Timestamp.fromDate(DateTime.now()),
+          'status': 'skipped',
+          'userId': userId,
+          'date': Timestamp.fromDate(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)),
+        };
+
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(userId)
+            .collection('history')
+            .add(historyEntry);
+
+        final nextIntake = await _calculateNextIntake(reminderData['medicine']['directions of use']);
+        await querySnapshot.docs.first.reference.update({
+          'nextIntake': nextIntake.toUtc(),
+        });
+
+        await _scheduleNotification(reminderData, nextIntake);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Reminder skipped. Next reminder scheduled.'),
+              backgroundColor: Colors.orange,
             ),
           );
         }
-        return;
       }
-
-      if (!mounted) return;
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => MedicinesScreen(
-            showBackButton: true,
-            reminderData: null,
-          ),
-        ),
-      );
     } catch (e) {
-      print('Error handling add medicine: $e');
+      print('Error in _handleCloseReminder: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error handling reminder'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
   @override
   void dispose() {
+    _dismissedDialogs.clear();  // Clean up
+    _activeReminders.clear(); // Add this line
+    WidgetsBinding.instance.removeObserver(this);  // Add this line
     _timer.cancel();
     flutterLocalNotificationsPlugin.cancelAll();
+    // Cancel all notification timers
+    _notificationTimers.values.forEach((timer) => timer.cancel());
+    _notificationTimers.clear();
     super.dispose();
   }
 
@@ -1149,7 +1381,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
       ),
       body: Column(
         children: [
-          // Add notification warning if disabled
           if (!_notificationsEnabled)
             Container(
               padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -1212,131 +1443,6 @@ class _ReminderScreenState extends State<ReminderScreen> {
                 ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildReminderCard(
-    Map<String, dynamic> reminderData,
-    DocumentReference reference,
-    Duration timeRemaining
-  ) {
-    return Dismissible(
-      key: Key(reference.id), // Changed to use document ID instead of medicine name
-      direction: DismissDirection.endToStart,
-      onDismissed: (direction) {
-        // Remove the item from Firestore
-        reference.delete();
-        
-        // Show a snackbar
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Reminder deleted'),
-            action: SnackBarAction(
-              label: 'Undo',
-              onPressed: () async {
-                // Restore the reminder
-                await reference.set(reminderData);
-              },
-            ),
-          ),
-        );
-      },
-      confirmDismiss: (direction) async {
-        return await showDialog(
-          context: context,
-          builder: (BuildContext context) {
-            return AlertDialog(
-              title: Text('Confirm Delete'),
-              content: Text('Are you sure you want to delete this reminder?'),
-              actions: [
-                TextButton(
-                  child: Text('Cancel'),
-                  onPressed: () => Navigator.of(context).pop(false),
-                ),
-                TextButton(
-                  child: Text('Delete', style: TextStyle(color: Colors.red)),
-                  onPressed: () => Navigator.of(context).pop(true),
-                ),
-              ],
-            );
-          },
-        );
-      },
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: EdgeInsets.symmetric(horizontal: 20),
-        color: Colors.red,
-        child: Icon(
-          Icons.delete,
-          color: Colors.white,
-        ),
-      ),
-      child: Card(
-        margin: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        elevation: 2,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Container(
-          padding: EdgeInsets.all(12),
-          child: Row(
-            children: [
-              Image.asset(
-                reminderData['medicine']['image'],
-                width: 50,
-                height: 50,
-              ),
-              SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      reminderData['medicine']['name'],
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    Text(
-                      reminderData['medicine']['genericName'],
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontStyle: FontStyle.italic,
-                        color: Colors.grey[600],
-                      ),
-                    ),
-                    Text(
-                      '${reminderData['tablets']} tablet/s',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey[800],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Container(
-                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: reminderData['isOneTime'] == true
-                  ? ElevatedButton(
-                      onPressed: () => _handleMedicineTaken(),
-                      child: Text('Take'),
-                    )
-                  : Text(
-                      '${timeRemaining.inHours}:${timeRemaining.inMinutes.remainder(60).toString().padLeft(2, '0')}:${timeRemaining.inSeconds.remainder(60).toString().padLeft(2, '0')}',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.grey[800],
-                      ),
-                    ),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }

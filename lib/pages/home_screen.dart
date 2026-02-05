@@ -267,26 +267,29 @@ class _HomeScreenContentState extends State<HomeScreenContent> {
   final ScrollController _scrollController = ScrollController();
   bool _showBackToTopButton = false;
 
-  // Update categories list to include Pain Reliever
+  // Update categories list based on unique classifications
   final List<String> categories = [
     'All',
+    'Analgesic',
     'Antacid',
-    'Cold',
-    'Cough',
-    'Fever',
-    'Flu',
-    'Pain Reliever',
-
+    'Antihistamine',
+    'Antitussive',
+    'Antipyretic',
+    'Decongestant',
+    'Mucolytic',
+    'NSAID'
   ];
 
   final List<String> categoryImages = [
     'assets/icons/medicines.png',
-    'assets/icons/stomach.png',  // Add new pain icon
-    'assets/icons/chills.png',
-    'assets/icons/coughing.png',
-    'assets/icons/fever.png',
-    'assets/icons/flu.png',
-    'assets/icons/pain.png'
+    'assets/icons/pain.png',      // Analgesic
+    'assets/icons/stomach.png',   // Antacid
+    'assets/icons/allergy.png',   // Antihistamine
+    'assets/icons/coughing.png',  // Antitussive
+    'assets/icons/fever.png',     // Antipyretic
+    'assets/icons/nose.png',      // Decongestant
+    'assets/icons/mucus.png',     // Mucolytic
+    'assets/icons/inflammation.png' // NSAID
   ];
 
   // Change to single category selection
@@ -333,11 +336,9 @@ class _HomeScreenContentState extends State<HomeScreenContent> {
     // If 'All' is selected or no search query, use all medicines
     List<Map<String, dynamic>> filteredMedicines = selectedCategory == 'All' 
         ? allMedicines
-        : MedicineRecommender.getRecommendedMedicines(
-            allMedicines,
-            selectedCategory,
-            searchQuery
-          );
+        : allMedicines.where((medicine) {
+            return medicine['classification'].contains(selectedCategory);
+          }).toList();
 
     // Apply search filtering if there's a search query
     if (searchQuery.isNotEmpty) {
@@ -611,8 +612,8 @@ class CategoriesWidget extends StatelessWidget {
                   onTap: () => onCategorySelected(category),
                   child: Container(
                     width: 100,
-                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                    margin: EdgeInsets.symmetric(horizontal: 4),
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+                    margin: EdgeInsets.symmetric(horizontal: 2),
                     decoration: BoxDecoration(
                       color: selectedCategories.first == category ? Colors.blue : Colors.grey,
                       borderRadius: BorderRadius.circular(24),
